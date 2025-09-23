@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Hand Strike Recognition</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #f4f6f9;
+      color: #333;
+      margin: 0;
+      padding: 0;
+    }
+
+    .container {
+      max-width: 850px;
+      margin: auto;
+      padding: 30px 20px;
+    }
+
+    h1 {
+      text-align: center;
+      color: #0056b3;
+      margin-bottom: 30px;
+    }
+
+    .upload-area {
+      background: #ffffff;
+      border: 2px dashed #007BFF;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      margin-bottom: 30px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
+    }
+
+    input[type="file"] {
+      margin-top: 10px;
+      font-size: 16px;
+    }
+
+    button {
+      margin-top: 15px;
+      background-color: #007BFF;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      font-size: 16px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background-color: #0056b3;
+    }
+
+    .loading-bar {
+      width: 100%;
+      height: 12px;
+      background: #ddd;
+      border-radius: 8px;
+      margin-top: 15px;
+      overflow: hidden;
+    }
+
+    .loading-bar div {
+      height: 100%;
+      width: 0;
+      background-color: #007BFF;
+      transition: width 0.4s ease;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid #ddd;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+      transition: transform 0.2s ease;
+    }
+
+    .card:hover {
+      transform: scale(1.01);
+    }
+
+    .card h3 {
+      margin-top: 0;
+      color: #007BFF;
+      font-size: 18px;
+    }
+
+    .suggestions {
+      background: #fff;
+      margin-top: 30px;
+      padding: 15px;
+      border-radius: 8px;
+      border: 2px dashed #aaa;
+    }
+
+    .suggestions h3 {
+      margin-top: 0;
+      font-size: 18px;
+      color: #444;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      background: #f9f9f9;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #e0e0e0;
+    }
+
+    img {
+      max-width: 100%;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Hand Strike Recognition System</h1>
+
+    <div class="upload-area">
+      <p><strong>Upload a hand-strike video file (mp4/mov/avi):</strong></p>
+      <input type="file" id="fileInput" accept=".mp4,.mov,.avi"/>
+      <br />
+      <button onclick="uploadVideo()">Upload & Predict</button>
+      <div class="loading-bar"><div id="progressBar"></div></div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Left Hand Actions</h3>
+        <pre id="leftActions">Waiting...</pre>
+      </div>
+      <div class="card">
+        <h3>Right Hand Actions</h3>
+        <pre id="rightActions">Waiting...</pre>
+      </div>
+      <div class="card">
+        <h3>Left Hand Accuracy</h3>
+        <pre id="leftAccuracy">Waiting...</pre>
+      </div>
+      <div class="card">
+        <h3>Right Hand Accuracy</h3>
+        <pre id="rightAccuracy">Waiting...</pre>
+      </div>
+      <div class="card">
+        <h3>Left Confusion Matrix</h3>
+        <img id="leftCM" src="" alt="Left Confusion Matrix"/>
+      </div>
+      <div class="card">
+        <h3>Right Confusion Matrix</h3>
+        <img id="rightCM" src="" alt="Right Confusion Matrix"/>
+      </div>
+    </div>
+
+    <div class="suggestions">
+      <h3>Suggestions</h3>
+      <ul id="suggestionsList"></ul>
+    </div>
+  </div>
+
+  <script>
+    async function uploadVideo() {
+      const input = document.getElementById("fileInput");
+      const file = input.files[0];
+      if (!file) return alert("Please select a video file.");
+
+      const formData = new FormData();
+      formData.append("video_file", file);
+      document.getElementById("progressBar").style.width = "30%";
+
+      try {
+        const response = await fetch("http://127.0.0.1:8000/recognize", {
+          method: "POST",
+          body: formData,
+        });
+
+        document.getElementById("progressBar").style.width = "70%";
+
+        if (!response.ok) {
+          const err = await response.json();
+          alert("Error: " + err.detail);
+          document.getElementById("progressBar").style.width = "0%";
+          return;
+        }
+
+        const data = await response.json();
+        document.getElementById("progressBar").style.width = "100%";
+
+        document.getElementById("leftActions").textContent = JSON.stringify(data.left_hand_counts, null, 2);
+        document.getElementById("rightActions").textContent = JSON.stringify(data.right_hand_counts, null, 2);
+        document.getElementById("leftAccuracy").textContent = JSON.stringify(data.left_hand_accuracy, null, 2);
+        document.getElementById("rightAccuracy").textContent = JSON.stringify(data.right_hand_accuracy, null, 2);
+        document.getElementById("leftCM").src = data.left_confusion_matrix_url;
+        document.getElementById("rightCM").src = data.right_confusion_matrix_url;
+
+        const suggestionList = document.getElementById("suggestionsList");
+        suggestionList.innerHTML = "";
+        data.suggestions.forEach(text => {
+          const li = document.createElement("li");
+          li.textContent = text;
+          suggestionList.appendChild(li);
+        });
+
+      } catch (err) {
+        alert("Upload failed: " + err.message);
+        document.getElementById("progressBar").style.width = "0%";
+      }
+    }
+  </script>
+</body>
+</html>
