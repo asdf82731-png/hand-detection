@@ -179,12 +179,43 @@ def create_feature_windows(landmarks_list, window_size=30, step=1):
 LABELS = ["Full", "Down", "Up", "Tab"]
 
 
-def _evaluate_hand_predictions(predictions):
-    """Confusion matrix, per-class counts and accuracy for one hand's own predictions."""
-    preds = np.argmax(np.vstack(predictions), axis=1)
+def _collapse_events(predictions):
+    """
+    Merge temporally consecutive windows sharing the same predicted label into
+    a single detected event, so overlapping sliding windows don't multiply-count
+    the same physical stroke. Returns a list of label indices, one per event.
 
-    # TEMP GROUND TRUTH: assume all windows belong to the same label (for test/demo)
-    true_label = int(preds[0]) if len(set(preds)) == 1 else 1
+    NOTE: an earlier version also gated windows on softmax confidence, dropping
+    low-confidence ones as "uncertain". Measured against real labeled clips,
+    this checkpoint's confidence scores did not separate correct from incorrect
+    predictions (wrong predictions were sometimes more "confident" than right
+    ones), so that gate was removed rather than ship a threshold that silently
+    discards correct detections.
+    """
+    events = []
+    current_label = None
+    for pred in predictions:
+        label = int(np.argmax(np.asarray(pred).reshape(-1)))
+        if label != current_label:
+            events.append(label)
+            current_label = label
+    return events
+
+
+def _evaluate_hand_predictions(predictions):
+    """Confusion matrix, per-event counts and accuracy for one hand's own predictions."""
+    events = _collapse_events(predictions)
+
+    if not events:
+        cm = np.zeros((len(LABELS), len(LABELS)), dtype=int)
+        counts = {label: 0 for label in LABELS}
+        accuracy_per_class = {label: 0.0 for label in LABELS}
+        return cm, counts, accuracy_per_class
+
+    preds = np.array(events)
+
+    # TEMP GROUND TRUTH: assume all detected events belong to the same label (for test/demo)
+    true_label = int(preds[0]) if len(set(events)) == 1 else 1
     y_true = np.full_like(preds, true_label)
 
     cm = confusion_matrix(y_true, preds, labels=range(len(LABELS)))
