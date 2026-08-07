@@ -181,7 +181,7 @@
       document.getElementById("progressBar").style.width = "30%";
 
       try {
-        const response = await fetch("http://127.0.0.1:8000/recognize", {
+        const response = await fetch("/recognize", {
           method: "POST",
           body: formData,
         });

@@ -32,14 +32,13 @@ class DynamicAdjacencyMatrix(nn.Module):
     def __init__(self, input_dim, num_nodes):
         super(DynamicAdjacencyMatrix, self).__init__()
         self.num_nodes = num_nodes
-        self.fc = nn.Linear(input_dim, num_nodes * num_nodes)
+        self.node_fc = nn.Linear(input_dim, num_nodes)
 
     def forward(self, X):
-        batch_size, time_steps, num_nodes, features = X.size()
-        X = X.mean(dim=1).mean(dim=1)  # Average over time AND nodes: shape becomes (B, F)
+        # X: (B, T, N, F) -> average over time only, keep each node's identity
+        X = X.mean(dim=1)  # (B, N, F)
 
-        A = self.fc(X)  # (B, N, N*N)
-        A = A.view(batch_size, self.num_nodes, self.num_nodes)
+        A = self.node_fc(X)  # (B, N, N)
         A = (A + A.transpose(-1, -2)) / 2  # Symmetrize
         return torch.softmax(A, dim=-1)
 
@@ -58,7 +57,8 @@ class ResidualCTRGCNLayer(nn.Module):
         x = self.bn(x)
         residual = residual.permute(0, 3, 1, 2)
         residual = self.residual_conv(residual)
-        return self.relu(x + residual)
+        out = self.relu(x + residual)  # (B, C, T, N)
+        return out.permute(0, 2, 3, 1)  # back to (B, T, N, C)
 
 class MultiMotionDevLSTMModel(nn.Module):
     def __init__(self, num_classes=4):  # Match saved model's 4 classes
@@ -113,20 +113,30 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 model = MultiMotionDevLSTMModel(num_classes=4)
 state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-
-# Handle potential parameter mismatches
-model_state_dict = model.state_dict()
-pretrained_dict = {k: v for k, v in state_dict.items() if k in model_state_dict and v.size() == model_state_dict[k].size()}
-model_state_dict.update(pretrained_dict)
-model.load_state_dict(model_state_dict)
+model.load_state_dict(state_dict)  # strict: fail loudly if the architecture ever drifts from the checkpoint again
 
 model.to(DEVICE).eval()
-print("[INFO] Model loaded with strict=False (some keys ignored).")
+print("[INFO] Model weights loaded successfully.")
 
 # === FastAPI Setup ===
 app = FastAPI(title="Hand Strike Recognition API")
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/")
+async def serve_index():
+    return FileResponse("index.html")
 
 class RecognitionResponse(BaseModel):
     status: str
@@ -173,8 +183,9 @@ async def recognize(video_file: UploadFile = File(...)):
         cap.release()
         print(f"[DEBUG] Total frames extracted: {len(frames)}")
         
-        if len(frames) < 10:
-            raise HTTPException(422, "Video too short (min 10 frames required)")
+        window_size = 30
+        if len(frames) < window_size:
+            raise HTTPException(422, f"Video too short (min {window_size} frames required)")
         
         # Process landmarks
         landmarks = []
@@ -186,7 +197,6 @@ async def recognize(video_file: UploadFile = File(...)):
                 landmarks.append(np.zeros((62, 9)))
         
         # Create windows
-        window_size = 30
         windows = []
         print(f"[DEBUG] Total landmark sets extracted: {len(landmarks)}")
         print(f"[DEBUG] Example landmark shape: {landmarks[0].shape if landmarks else 'None'}")
