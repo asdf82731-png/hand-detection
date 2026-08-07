@@ -96,6 +96,12 @@
       font-size: 18px;
     }
 
+    .note {
+      color: #777;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+
     .suggestions {
       background: #fff;
       margin-top: 30px;
@@ -147,11 +153,11 @@
         <pre id="rightActions">Waiting...</pre>
       </div>
       <div class="card">
-        <h3>Left Hand Accuracy</h3>
+        <h3>Left Hand Consistency</h3>
         <pre id="leftAccuracy">Waiting...</pre>
       </div>
       <div class="card">
-        <h3>Right Hand Accuracy</h3>
+        <h3>Right Hand Consistency</h3>
         <pre id="rightAccuracy">Waiting...</pre>
       </div>
       <div class="card">
@@ -163,6 +169,8 @@
         <img id="rightCM" src="" alt="Right Confusion Matrix"/>
       </div>
     </div>
+
+    <p class="note">"Consistency" shows how often the detected strokes for that hand agreed with each other in this video — it is not measured against a human-verified ground truth.</p>
 
     <div class="suggestions">
       <h3>Suggestions</h3>
