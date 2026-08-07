@@ -11,6 +11,7 @@ from pipeline import (
     check_video_file,
     extract_screenshots,
     preprocess_landmarks,
+    preprocess_landmarks_per_hand,
     create_feature_windows,
     evaluate_metrics
 )
@@ -187,51 +188,59 @@ async def recognize(video_file: UploadFile = File(...)):
         if len(frames) < window_size:
             raise HTTPException(422, f"Video too short (min {window_size} frames required)")
         
-        # Process landmarks
-        landmarks = []
+        # Process landmarks independently per hand (other hand's data zeroed out)
+        left_landmarks = []
+        right_landmarks = []
         for frame in frames:
             try:
-                lm = preprocess_landmarks(frame)
-                landmarks.append(lm if lm.shape == (62, 9) else np.zeros((62, 9)))
-            except:
-                landmarks.append(np.zeros((62, 9)))
-        
-        # Create windows
-        windows = []
-        print(f"[DEBUG] Total landmark sets extracted: {len(landmarks)}")
-        print(f"[DEBUG] Example landmark shape: {landmarks[0].shape if landmarks else 'None'}")
-        for i in range(0, len(landmarks) - window_size + 1, window_size // 2):
-            window = np.stack(landmarks[i:i+window_size])
-            if window.shape == (window_size, 62, 9):
-                windows.append(window)
-        
-        print(f"[DEBUG] Total windows created: {len(windows)}")
-        if windows:
-            print(f"[DEBUG] Each window shape: {windows[0].shape}")
-        if not windows:
+                left_lm, right_lm = preprocess_landmarks_per_hand(frame)
+            except Exception:
+                left_lm, right_lm = np.zeros((62, 9)), np.zeros((62, 9))
+            left_landmarks.append(left_lm if left_lm.shape == (62, 9) else np.zeros((62, 9)))
+            right_landmarks.append(right_lm if right_lm.shape == (62, 9) else np.zeros((62, 9)))
+
+        print(f"[DEBUG] Total landmark sets extracted: {len(left_landmarks)}")
+
+        def build_windows(landmarks_list):
+            windows = []
+            for i in range(0, len(landmarks_list) - window_size + 1, window_size // 2):
+                window = np.stack(landmarks_list[i:i+window_size])
+                if window.shape == (window_size, 62, 9):
+                    windows.append(window)
+            return windows
+
+        left_windows = build_windows(left_landmarks)
+        right_windows = build_windows(right_landmarks)
+
+        print(f"[DEBUG] Left windows: {len(left_windows)}, Right windows: {len(right_windows)}")
+        if not left_windows or not right_windows:
             raise HTTPException(422, "No valid windows created")
-        
+
         # Model inference
         model.eval()
-        predictions = []
-        for window in windows:
-            try:
-                input_tensor = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
-                with torch.no_grad():
-                    output = model(input_tensor)
-                predictions.append(output.numpy())
-            except Exception as e:
-                print(f"[ERROR] Prediction failed: {e}")
-                continue
-        
-        print(f"[DEBUG] Total predictions made: {len(predictions)}")
-        if predictions:
-            print(f"[DEBUG] Example prediction: {predictions[0]}")
-        if not predictions:
+
+        def run_inference(windows):
+            predictions = []
+            for window in windows:
+                try:
+                    input_tensor = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
+                    with torch.no_grad():
+                        output = model(input_tensor)
+                    predictions.append(output.numpy())
+                except Exception as e:
+                    print(f"[ERROR] Prediction failed: {e}")
+                    continue
+            return predictions
+
+        left_predictions = run_inference(left_windows)
+        right_predictions = run_inference(right_windows)
+
+        print(f"[DEBUG] Left predictions: {len(left_predictions)}, Right predictions: {len(right_predictions)}")
+        if not left_predictions or not right_predictions:
             raise HTTPException(422, "No valid predictions")
-        
-        # Process results (✅ now passing all args)
-        results = evaluate_metrics(predictions, CM_BASE_URL, vid_id, STATIC_DIR)
+
+        # Process results
+        results = evaluate_metrics(left_predictions, right_predictions, CM_BASE_URL, vid_id, STATIC_DIR)
         return JSONResponse(content={"status": "success", **results})
     
     except HTTPException:

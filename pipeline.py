@@ -59,14 +59,23 @@ def extract_screenshots(video_path, frame_interval=30):
     cap.release()
     return screenshots
 
-def preprocess_landmarks(image):
+BONE_CONNECTIONS = [
+    (0,1), (1,2), (2,3), (3,4),    # Thumb
+    (0,5), (5,6), (6,7), (7,8),     # Index
+    (0,9), (9,10), (10,11), (11,12), # Middle
+    (0,13), (13,14), (14,15), (15,16), # Ring
+    (0,17), (17,18), (18,19), (19,20)  # Pinky
+]
+
+def _extract_hand_joint_blocks(image):
+    """Run MediaPipe once and return (left_hand, right_hand), each (21, 9)."""
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = mp_hands.process(image_rgb)
 
     # Initialize arrays for both hands (21 landmarks each)
     left_hand = np.zeros((21, 9), dtype=np.float32)
     right_hand = np.zeros((21, 9), dtype=np.float32)
-    
+
     if results.multi_hand_landmarks:
         for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
             hand_type = handedness.classification[0].label
@@ -96,7 +105,7 @@ def preprocess_landmarks(image):
             features = np.concatenate([
                 coords,        # 3 (x,y,z)
                 velocity,      # 3 (vx,vy,vz)
-                angle,         # 1 
+                angle,         # 1
                 dist_center,   # 1
                 bone_len       # 1
             ], axis=1)
@@ -106,40 +115,51 @@ def preprocess_landmarks(image):
             else:
                 right_hand = features
 
-    # Combine both hands (42 joints total, each with 9 features)
-    joints = np.vstack([left_hand, right_hand])
+    return left_hand, right_hand
 
-    # Calculate simplified bone features: midpoint + direction = 6 features
+
+def _compute_bone_block(hand_joints):
+    """Skeletal bone-vector block (20, 9) — midpoint + direction per bone, padded — for one hand's (21, 9) joints."""
     bones = np.zeros((20, 6), dtype=np.float32)
-    if results.multi_hand_landmarks:
-        bone_connections = [
-            (0,1), (1,2), (2,3), (3,4),    # Thumb
-            (0,5), (5,6), (6,7), (7,8),     # Index
-            (0,9), (9,10), (10,11), (11,12), # Middle
-            (0,13), (13,14), (14,15), (15,16), # Ring
-            (0,17), (17,18), (18,19), (19,20)  # Pinky
-        ]
+    for i, (j1, j2) in enumerate(BONE_CONNECTIONS):
+        try:
+            joint1 = hand_joints[j1]
+            joint2 = hand_joints[j2]
 
-        for i, (j1, j2) in enumerate(bone_connections):
-            try:
-                joint1 = joints[j1]
-                joint2 = joints[j2]
+            # Midpoint (3D)
+            midpoint = (joint1[:3] + joint2[:3]) / 2
+            # Direction vector (3D)
+            direction = joint2[:3] - joint1[:3]
 
-                # Midpoint (3D)
-                midpoint = (joint1[:3] + joint2[:3]) / 2
-                # Direction vector (3D)
-                direction = joint2[:3] - joint1[:3]
-
-                bones[i] = np.concatenate([midpoint, direction])
-            except Exception as e:
-                print(f"Error processing bone {i}: {str(e)}")
-                bones[i] = np.zeros(6)
+            bones[i] = np.concatenate([midpoint, direction])
+        except Exception as e:
+            print(f"Error processing bone {i}: {str(e)}")
+            bones[i] = np.zeros(6)
 
     # Pad bones to 9 features (for stacking compatibility)
-    bone_part_padded = np.pad(bones, ((0, 0), (0, 3)), mode='constant')
+    return np.pad(bones, ((0, 0), (0, 3)), mode='constant')
 
-    # Final output: (62, 9)
+
+def preprocess_landmarks(image):
+    """Combined-hands feature block (62, 9): both hands' joints, bones from the left-hand slot."""
+    left_hand, right_hand = _extract_hand_joint_blocks(image)
+    joints = np.vstack([left_hand, right_hand])
+    bone_part_padded = _compute_bone_block(left_hand)
     return np.vstack([joints, bone_part_padded])
+
+
+def preprocess_landmarks_per_hand(image):
+    """
+    Independent per-hand feature blocks (62, 9) each: the other hand's joints and
+    bones are zeroed out so the shared model can be run once per hand and produce
+    a genuinely separate left-hand and right-hand prediction.
+    """
+    left_hand, right_hand = _extract_hand_joint_blocks(image)
+    zeros_hand = np.zeros((21, 9), dtype=np.float32)
+
+    left_only = np.vstack([np.vstack([left_hand, zeros_hand]), _compute_bone_block(left_hand)])
+    right_only = np.vstack([np.vstack([zeros_hand, right_hand]), _compute_bone_block(right_hand)])
+    return left_only, right_only
 
 
 # 4. Windowing
@@ -156,28 +176,38 @@ def create_feature_windows(landmarks_list, window_size=30, step=1):
 
 # 5. Metrics & Confusion Matrices
 
-def evaluate_metrics(predictions, cm_base_url, vid_id, static_dir):
+LABELS = ["Full", "Down", "Up", "Tab"]
+
+
+def _evaluate_hand_predictions(predictions):
+    """Confusion matrix, per-class counts and accuracy for one hand's own predictions."""
     preds = np.argmax(np.vstack(predictions), axis=1)
-    
+
     # TEMP GROUND TRUTH: assume all windows belong to the same label (for test/demo)
     true_label = int(preds[0]) if len(set(preds)) == 1 else 1
     y_true = np.full_like(preds, true_label)
 
-    labels = ["Full", "Down", "Up", "Tab"]
-    cm = confusion_matrix(y_true, preds, labels=range(len(labels)))
-    
-    # Compute per-class accuracy
+    cm = confusion_matrix(y_true, preds, labels=range(len(LABELS)))
+
     accuracy_per_class = {}
-    for i, label in enumerate(labels):
+    for i, label in enumerate(LABELS):
         total = cm[i].sum()
         correct = cm[i, i]
         accuracy = (correct / total * 100) if total else 0.0
         accuracy_per_class[label] = round(accuracy, 2)
 
+    counts = {label: int(count) for label, count in zip(LABELS, cm.sum(axis=0))}
+    return cm, counts, accuracy_per_class
+
+
+def evaluate_metrics(left_predictions, right_predictions, cm_base_url, vid_id, static_dir):
+    left_cm, left_counts, left_accuracy = _evaluate_hand_predictions(left_predictions)
+    right_cm, right_counts, right_accuracy = _evaluate_hand_predictions(right_predictions)
+
     # Save confusion matrix as image
     def save_cm(cm, hand):
         fig, ax = plt.subplots()
-        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels, cbar=False)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=LABELS, yticklabels=LABELS, cbar=False)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         ax.set_title(f"{hand} Hand Confusion Matrix")
@@ -186,20 +216,21 @@ def evaluate_metrics(predictions, cm_base_url, vid_id, static_dir):
         plt.close()
         return f"{cm_base_url}/{hand}_{vid_id}.png"
 
-    left_cm_url = save_cm(cm, "Left")
-    right_cm_url = save_cm(cm, "Right")
+    left_cm_url = save_cm(left_cm, "Left")
+    right_cm_url = save_cm(right_cm, "Right")
 
     # Suggestions for improvement
     suggestions = []
-    for label in labels:
-        if accuracy_per_class[label] < 70:
-            suggestions.append(f"Try making the '{label}' gesture more distinct — it wasn't reliably recognized.")
+    for hand_name, accuracy_per_class in [("left", left_accuracy), ("right", right_accuracy)]:
+        for label, accuracy in accuracy_per_class.items():
+            if accuracy < 70:
+                suggestions.append(f"Try making the {hand_name} hand's '{label}' gesture more distinct — it wasn't reliably recognized.")
 
     return {
-        "left_hand_counts": {label: int(count) for label, count in zip(labels, cm.sum(axis=0))},
-        "right_hand_counts": {label: int(count) for label, count in zip(labels, cm.sum(axis=0))},
-        "left_hand_accuracy": accuracy_per_class,
-        "right_hand_accuracy": accuracy_per_class,
+        "left_hand_counts": left_counts,
+        "right_hand_counts": right_counts,
+        "left_hand_accuracy": left_accuracy,
+        "right_hand_accuracy": right_accuracy,
         "left_confusion_matrix_url": left_cm_url,
         "right_confusion_matrix_url": right_cm_url,
         "suggestions": suggestions
