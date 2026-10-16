@@ -11,6 +11,7 @@ from pipeline import (
     check_video_file,
     extract_screenshots,
     preprocess_landmarks,
+    preprocess_landmarks_per_hand,
     create_feature_windows,
     evaluate_metrics
 )
@@ -32,14 +33,13 @@ class DynamicAdjacencyMatrix(nn.Module):
     def __init__(self, input_dim, num_nodes):
         super(DynamicAdjacencyMatrix, self).__init__()
         self.num_nodes = num_nodes
-        self.fc = nn.Linear(input_dim, num_nodes * num_nodes)
+        self.node_fc = nn.Linear(input_dim, num_nodes)
 
     def forward(self, X):
-        batch_size, time_steps, num_nodes, features = X.size()
-        X = X.mean(dim=1).mean(dim=1)  # Average over time AND nodes: shape becomes (B, F)
+        # X: (B, T, N, F) -> average over time only, keep each node's identity
+        X = X.mean(dim=1)  # (B, N, F)
 
-        A = self.fc(X)  # (B, N, N*N)
-        A = A.view(batch_size, self.num_nodes, self.num_nodes)
+        A = self.node_fc(X)  # (B, N, N)
         A = (A + A.transpose(-1, -2)) / 2  # Symmetrize
         return torch.softmax(A, dim=-1)
 
@@ -58,7 +58,8 @@ class ResidualCTRGCNLayer(nn.Module):
         x = self.bn(x)
         residual = residual.permute(0, 3, 1, 2)
         residual = self.residual_conv(residual)
-        return self.relu(x + residual)
+        out = self.relu(x + residual)  # (B, C, T, N)
+        return out.permute(0, 2, 3, 1)  # back to (B, T, N, C)
 
 class MultiMotionDevLSTMModel(nn.Module):
     def __init__(self, num_classes=4):  # Match saved model's 4 classes
@@ -113,20 +114,30 @@ os.makedirs(STATIC_DIR, exist_ok=True)
 
 model = MultiMotionDevLSTMModel(num_classes=4)
 state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-
-# Handle potential parameter mismatches
-model_state_dict = model.state_dict()
-pretrained_dict = {k: v for k, v in state_dict.items() if k in model_state_dict and v.size() == model_state_dict[k].size()}
-model_state_dict.update(pretrained_dict)
-model.load_state_dict(model_state_dict)
+model.load_state_dict(state_dict)  # strict: fail loudly if the architecture ever drifts from the checkpoint again
 
 model.to(DEVICE).eval()
-print("[INFO] Model loaded with strict=False (some keys ignored).")
+print("[INFO] Model weights loaded successfully.")
 
 # === FastAPI Setup ===
 app = FastAPI(title="Hand Strike Recognition API")
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+@app.get("/")
+async def serve_index():
+    return FileResponse("index.html")
 
 class RecognitionResponse(BaseModel):
     status: str
@@ -173,55 +184,63 @@ async def recognize(video_file: UploadFile = File(...)):
         cap.release()
         print(f"[DEBUG] Total frames extracted: {len(frames)}")
         
-        if len(frames) < 10:
-            raise HTTPException(422, "Video too short (min 10 frames required)")
+        window_size = 30
+        if len(frames) < window_size:
+            raise HTTPException(422, f"Video too short (min {window_size} frames required)")
         
-        # Process landmarks
-        landmarks = []
+        # Process landmarks independently per hand (other hand's data zeroed out)
+        left_landmarks = []
+        right_landmarks = []
         for frame in frames:
             try:
-                lm = preprocess_landmarks(frame)
-                landmarks.append(lm if lm.shape == (62, 9) else np.zeros((62, 9)))
-            except:
-                landmarks.append(np.zeros((62, 9)))
-        
-        # Create windows
-        window_size = 30
-        windows = []
-        print(f"[DEBUG] Total landmark sets extracted: {len(landmarks)}")
-        print(f"[DEBUG] Example landmark shape: {landmarks[0].shape if landmarks else 'None'}")
-        for i in range(0, len(landmarks) - window_size + 1, window_size // 2):
-            window = np.stack(landmarks[i:i+window_size])
-            if window.shape == (window_size, 62, 9):
-                windows.append(window)
-        
-        print(f"[DEBUG] Total windows created: {len(windows)}")
-        if windows:
-            print(f"[DEBUG] Each window shape: {windows[0].shape}")
-        if not windows:
+                left_lm, right_lm = preprocess_landmarks_per_hand(frame)
+            except Exception:
+                left_lm, right_lm = np.zeros((62, 9)), np.zeros((62, 9))
+            left_landmarks.append(left_lm if left_lm.shape == (62, 9) else np.zeros((62, 9)))
+            right_landmarks.append(right_lm if right_lm.shape == (62, 9) else np.zeros((62, 9)))
+
+        print(f"[DEBUG] Total landmark sets extracted: {len(left_landmarks)}")
+
+        def build_windows(landmarks_list):
+            windows = []
+            for i in range(0, len(landmarks_list) - window_size + 1, window_size // 2):
+                window = np.stack(landmarks_list[i:i+window_size])
+                if window.shape == (window_size, 62, 9):
+                    windows.append(window)
+            return windows
+
+        left_windows = build_windows(left_landmarks)
+        right_windows = build_windows(right_landmarks)
+
+        print(f"[DEBUG] Left windows: {len(left_windows)}, Right windows: {len(right_windows)}")
+        if not left_windows or not right_windows:
             raise HTTPException(422, "No valid windows created")
-        
+
         # Model inference
         model.eval()
-        predictions = []
-        for window in windows:
-            try:
-                input_tensor = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
-                with torch.no_grad():
-                    output = model(input_tensor)
-                predictions.append(output.numpy())
-            except Exception as e:
-                print(f"[ERROR] Prediction failed: {e}")
-                continue
-        
-        print(f"[DEBUG] Total predictions made: {len(predictions)}")
-        if predictions:
-            print(f"[DEBUG] Example prediction: {predictions[0]}")
-        if not predictions:
+
+        def run_inference(windows):
+            predictions = []
+            for window in windows:
+                try:
+                    input_tensor = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
+                    with torch.no_grad():
+                        output = model(input_tensor)
+                    predictions.append(output.numpy())
+                except Exception as e:
+                    print(f"[ERROR] Prediction failed: {e}")
+                    continue
+            return predictions
+
+        left_predictions = run_inference(left_windows)
+        right_predictions = run_inference(right_windows)
+
+        print(f"[DEBUG] Left predictions: {len(left_predictions)}, Right predictions: {len(right_predictions)}")
+        if not left_predictions or not right_predictions:
             raise HTTPException(422, "No valid predictions")
-        
-        # Process results (✅ now passing all args)
-        results = evaluate_metrics(predictions, CM_BASE_URL, vid_id, STATIC_DIR)
+
+        # Process results
+        results = evaluate_metrics(left_predictions, right_predictions, CM_BASE_URL, vid_id, STATIC_DIR)
         return JSONResponse(content={"status": "success", **results})
     
     except HTTPException:

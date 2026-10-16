@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+python-multipart
+opencv-python-headless
+mediapipe==0.10.21  # 1.0.0+ removed the legacy mp.solutions.hands API this pipeline relies on
+numpy
+torch
+scikit-learn
+matplotlib
+seaborn
