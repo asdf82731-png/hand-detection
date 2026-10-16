@@ -2,7 +2,7 @@
 
 最後更新：2026-10-16
 
-這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。
+這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。Phase 2/3 的實作細節另見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md)。
 
 ## 目標與成功標準
 
@@ -36,6 +36,7 @@
 - [x] UI 文字誠實化（Accuracy → Consistency）
 - [x] `.github/workflows/claude.yml`、`CLAUDE.md` 專案規範
 - [x] `ROADMAP.md` 建立並確認關鍵決策（標籤空間、GPU、商業方向）
+- [x] `TRAINING_DESIGN.md`：Phase 2/3 技術規格文件（資料模型、架構變動、API contract、測試計畫）
 
 ## Phase 1 — 解除重訓練的材料瓶頸
 
@@ -48,20 +49,24 @@
 
 ## Phase 2 — 把 CSV 細部標籤真正接進訓練資料管線
 
+> 詳細規格見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md) 第 1 節。
+
 | 任務 | PIC | 狀態 |
 |---|---|---|
 | ~~決定標籤空間~~ → 已定案：論文 7 類，左右手各自獨立 | 使用者 | ✅ 已確認 |
-| 設計 `frame_id + hand → 特徵 + 7類標籤` 的資料載入邏輯（左右手分開監督） | Claude | 待辦 |
-| 實作資料載入 + train/val split | Claude | 待辦 |
-| 寫測試驗證資料對齊正確（特別是左右手標籤不要對調） | Claude | 待辦 |
+| ~~設計資料載入邏輯~~ → 規格已寫完（frame 對位、缺幀排除、視窗標籤規則、train/val 切分） | Claude | ✅ 規格完成，待 Phase 1 素材到位後實作 |
+| 實作資料載入 + train/val split（照規格寫程式） | Claude | 待辦，等 Phase 1 影片 |
+| 寫測試驗證資料對齊正確（特別是左右手標籤不要對調） | Claude | 待辦，可與上一項同時做 |
 
 ## Phase 3 — 架構修正以配合重訓練
 
+> 詳細規格見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md) 第 2 節。
+
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| `num_classes` 從 4 改成 7，確認左右手共用分類頭的設計仍然合理 | Claude | 待辦 |
-| 讓 DynamicAdjacencyMatrix 真正參與梯度更新 | Claude | 待辦 |
-| 真正算出手腕夾角特徵（替換恆零的 angle 欄位） | Claude 實作 / 使用者確認定義 | 待辦 |
+| `num_classes` 從 4 改成 7 | Claude | 待辦（規格已定，單一參數改動） |
+| ~~讓 DynamicAdjacencyMatrix 真正參與梯度更新~~ → 重新檢查後發現架構面已經接好，不需要再改程式碼，只要用新流程重訓練 node_fc 自然會被訓練到 | Claude | ✅ 已確認不需額外改動 |
+| 真正算出手腕夾角特徵（替換恆零的 angle 欄位） | Claude 實作 / 使用者確認定義 | ⏸️ 建議延後到下一輪迭代（Phase 4.4），不卡這次 7 類重訓練 |
 | ~~決定要不要加 hold/none 類別~~ → 已定案：加，併入 7 類 | 使用者 | ✅ 已確認 |
 
 ## Phase 4 — 訓練與驗證
@@ -75,10 +80,13 @@
 
 ## Phase 5 — 部署新模型
 
+> 詳細規格見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md) 第 3 節——設計後發現 **API JSON 格式跟 `index.html` 其實都不用改**，7 類的 hold/none 只在內部用來讓事件切分更準，對外還是只回報 4 種主動動作的次數跟 Consistency。
+
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| 更新 `main.py`/`pipeline.py` 對應新 checkpoint（7 類輸出、API response 格式調整） | Claude | 待辦 |
-| 更新 `index.html` 顯示新的 7 類結果（含 hold/none） | Claude | 待辦 |
+| 更新 `main.py`（新 checkpoint 路徑、`num_classes=7`） | Claude | 待辦 |
+| 更新 `pipeline.py`（`_collapse_events`/`_evaluate_hand_predictions` 改成 7 類運算、輸出時過濾掉 hold/none） | Claude | 待辦 |
+| ~~更新 `index.html`~~ → 不需要，JSON schema 沒變 | — | ✅ 已確認不用改 |
 | 端到端瀏覽器測試 | Claude | 待辦 |
 | Commit/PR | Claude | 待辦 |
 | 確認合併進 main | 使用者 | 待辦 |
