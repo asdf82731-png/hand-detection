@@ -1,6 +1,6 @@
 # Roadmap — 手部揮擊動作辨識系統
 
-最後更新：2026-10-16
+最後更新：2026-10-16（Phase 2/3 程式碼實作完成）
 
 這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。Phase 2/3 的實作細節另見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md)。
 
@@ -37,6 +37,9 @@
 - [x] `.github/workflows/claude.yml`、`CLAUDE.md` 專案規範
 - [x] `ROADMAP.md` 建立並確認關鍵決策（標籤空間、GPU、商業方向）
 - [x] `TRAINING_DESIGN.md`：Phase 2/3 技術規格文件（資料模型、架構變動、API contract、測試計畫）
+- [x] `model.py`：把 `MultiMotionDevLSTMModel` 等類別從 `main.py` 抽出成共用模組，`main.py` 改成 import，行為不變（已用現有 4 類 checkpoint strict load + forward pass 驗證無迴歸）
+- [x] `data_pipeline.py` + `test_data_pipeline.py`：CSV 標籤正規化、frame 對位（含缺幀排除）、視窗標籤規則（最後一幀）、train/val 無洩漏切分，10 個單元測試全過（純邏輯，合成資料，不依賴真實影片）
+- [x] `train.py`：`MultiMotionDevLSTMModel(num_classes=7)` + 訓練迴圈骨架，合成資料 smoke test 驗證形狀與訓練流程正確；`load_training_samples()` 讀真實影片/CSV 的部分仍是 `NotImplementedError`，卡在 Phase 1
 
 ## Phase 1 — 解除重訓練的材料瓶頸
 
@@ -54,9 +57,10 @@
 | 任務 | PIC | 狀態 |
 |---|---|---|
 | ~~決定標籤空間~~ → 已定案：論文 7 類，左右手各自獨立 | 使用者 | ✅ 已確認 |
-| ~~設計資料載入邏輯~~ → 規格已寫完（frame 對位、缺幀排除、視窗標籤規則、train/val 切分） | Claude | ✅ 規格完成，待 Phase 1 素材到位後實作 |
-| 實作資料載入 + train/val split（照規格寫程式） | Claude | 待辦，等 Phase 1 影片 |
-| 寫測試驗證資料對齊正確（特別是左右手標籤不要對調） | Claude | 待辦，可與上一項同時做 |
+| ~~設計資料載入邏輯~~ → 規格已寫完（frame 對位、缺幀排除、視窗標籤規則、train/val 切分） | Claude | ✅ 規格完成 |
+| 實作資料載入 + train/val split（照規格寫程式） | Claude | ✅ `data_pipeline.py` 已完成（CSV 解析/正規化、frame 對位、視窗標籤、train/val 切分邏輯皆為純函式，合成資料可測） |
+| 寫測試驗證資料對齊正確（特別是左右手標籤不要對調） | Claude | ✅ `test_data_pipeline.py` 10 項測試全過，涵蓋左右手不對調、缺幀排除、視窗標籤規則、train/val 無洩漏 |
+| 用真實影片逐幀特徵接上 `data_pipeline.py`、實際組出訓練樣本 | Claude | 待辦，等 Phase 1 影片（`train.py` 的 `load_training_samples()` 目前是 `NotImplementedError`） |
 
 ## Phase 3 — 架構修正以配合重訓練
 
@@ -64,7 +68,7 @@
 
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| `num_classes` 從 4 改成 7 | Claude | 待辦（規格已定，單一參數改動） |
+| `num_classes` 從 4 改成 7 | Claude | ✅ `model.py` 的 `MultiMotionDevLSTMModel` 已支援（`num_classes` 為必填參數，`main.py` 推論仍明確傳 4，訓練腳本傳 7），尚未真正用 7 類資料訓練出新 checkpoint |
 | ~~讓 DynamicAdjacencyMatrix 真正參與梯度更新~~ → 重新檢查後發現架構面已經接好，不需要再改程式碼，只要用新流程重訓練 node_fc 自然會被訓練到 | Claude | ✅ 已確認不需額外改動 |
 | 真正算出手腕夾角特徵（替換恆零的 angle 欄位） | Claude 實作 / 使用者確認定義 | ⏸️ 建議延後到下一輪迭代（Phase 4.4），不卡這次 7 類重訓練 |
 | ~~決定要不要加 hold/none 類別~~ → 已定案：加，併入 7 類 | 使用者 | ✅ 已確認 |
@@ -73,7 +77,7 @@
 
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| 撰寫/調整訓練腳本（沿用 `new_work.ipynb` 邏輯，輸出改 7 類） | Claude | 待辦 |
+| 撰寫/調整訓練腳本（沿用 `new_work.ipynb` 邏輯，輸出改 7 類） | Claude | ✅ `train.py` 骨架完成（模型+優化器+訓練迴圈，CrossEntropyLoss+Adam，合成資料 smoke test 通過），讀真實資料那段待 Phase 1 影片到位後補上 |
 | **實際執行訓練（本機 RTX 4060）** | **使用者** | 待辦，等 Phase 1–3 完成 |
 | 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | 待辦 |
 | 決定是否達標、要不要再迭代 | 使用者 | 待辦 |
