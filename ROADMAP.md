@@ -1,6 +1,6 @@
 # Roadmap — 手部揮擊動作辨識系統
 
-最後更新：2026-11-12（四支影片已取得、手部偵測已改追蹤模式，只剩 CSV 標籤檔）
+最後更新：2026-11-12（訓練程式已改成照論文研究方法，只剩 CSV 標籤檔）
 
 這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。Phase 2/3 的實作細節另見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md)。
 
@@ -19,6 +19,7 @@
 - **標籤空間**：改用論文定義的 7 類——`full_stroke`、`down_stroke`、`up_stroke`、`tab_stroke`、`down_hold`、`up_hold`、`none`。**左右手各自獨立套用全部 7 類**（不是共用一組 4 類再複製），模型最後分類層從 `Linear(128,4)` 改成 `Linear(128,7)`，左右手仍沿用現有「單手遮罩、同一模型各跑一次」的做法，但現在兩次推論各自解讀出 7 類結果。
 - **訓練環境**：使用者有本機 GPU（RTX 4060）可用，Phase 4 訓練可行，不需要依賴 Colab。
 - **商業方向**：確認鎖定個人消費者練習 App。
+- **研究方法對齊論文（2026-11-12）**：逐項對照論文第三、四章後，決定「類別數維持 7 類、train/val 維持按時間切分，其餘全部照論文」。對照表與實作決定見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md) 第 0 節。
 
 ## 關鍵假設
 
@@ -85,7 +86,9 @@
 | ~~設計資料載入邏輯~~ → 規格已寫完（frame 對位、缺幀排除、視窗標籤規則、train/val 切分） | Claude | ✅ 規格完成 |
 | 實作資料載入 + train/val split（照規格寫程式） | Claude | ✅ `data_pipeline.py` 已完成（CSV 解析/正規化、frame 對位、視窗標籤、train/val 切分邏輯皆為純函式，合成資料可測） |
 | 寫測試驗證資料對齊正確（特別是左右手標籤不要對調） | Claude | ✅ `test_data_pipeline.py` 10 項測試全過，涵蓋左右手不對調、缺幀排除、視窗標籤規則、train/val 無洩漏 |
-| 用真實影片逐幀特徵接上 `data_pipeline.py`、實際組出訓練樣本 | Claude | 待辦，等 Phase 1 影片（`train.py` 的 `load_training_samples()` 目前是 `NotImplementedError`） |
+| 用真實影片接上 `data_pipeline.py`、實際組出訓練樣本 | Claude | ✅ `train.py` 的 `load_split_windows()` 完成，用四支真實影片 + 假造標籤試跑通過（三支影片約 1714 個訓練視窗、226 個驗證視窗）；缺 CSV 的影片會明確顯示跳過 |
+| 照論文方法重寫特徵抽取（像素座標、插值補幀、手腕相對座標、時間上的速度與加速度、骨骼向量、歸一化、步長 1） | Claude | ✅ `features.py` + `test_features.py`，11 項測試全過 |
+| 用真實 CSV 確認「CSV 的 left/right」對應 MediaPipe 的哪一邊，填入 `train.py` 的 `CSV_HAND_TO_SLOT` | Claude | 待辦，等 CSV；未設定時 `train.py` 會直接報錯，不會用猜的訓練 |
 
 ## Phase 3 — 架構修正以配合重訓練
 
@@ -93,18 +96,17 @@
 
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| `num_classes` 從 4 改成 7 | Claude | ✅ `model.py` 的 `MultiMotionDevLSTMModel` 已支援（`num_classes` 為必填參數，`main.py` 推論仍明確傳 4，訓練腳本傳 7），尚未真正用 7 類資料訓練出新 checkpoint |
-| ~~讓 DynamicAdjacencyMatrix 真正參與梯度更新~~ → 重新檢查後發現架構面已經接好，不需要再改程式碼，只要用新流程重訓練 node_fc 自然會被訓練到 | Claude | ✅ 已確認不需額外改動 |
-| 真正算出手腕夾角特徵（替換恆零的 angle 欄位） | Claude 實作 / 使用者確認定義 | ⏸️ 建議延後到下一輪迭代（Phase 4.4），不卡這次 7 類重訓練 |
+| 照論文架構實作新模型（相似度鄰接矩陣、殘差圖卷積、雙向 LSTM 128、Dropout 0.5、GELU），輸出 7 類 | Claude | ✅ `model.py` 的 `StrokeBiLSTMModel`；舊的 `MultiMotionDevLSTMModel` 只留給現有 4 類 checkpoint，新 checkpoint 部署後移除 |
+| ~~讓 DynamicAdjacencyMatrix 真正參與梯度更新~~ → 新模型的鄰接矩陣直接接在圖卷積的運算裡，訓練時會被更新 | Claude | ✅ 完成 |
+| ~~真正算出手腕夾角特徵~~ → 取消：論文的特徵是位置、速度、加速度，沒有夾角欄位 | — | ✅ 不需要 |
 | ~~決定要不要加 hold/none 類別~~ → 已定案：加，併入 7 類 | 使用者 | ✅ 已確認 |
 
 ## Phase 4 — 訓練與驗證
 
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| 撰寫/調整訓練腳本（沿用 `new_work.ipynb` 邏輯，輸出改 7 類） | Claude | ✅ `train.py` 骨架完成（模型+優化器+訓練迴圈，CrossEntropyLoss+Adam，合成資料 smoke test 通過），讀真實資料那段待 Phase 1 影片到位後補上 |
-| 第一輪訓練（Full/Down/Up，缺 Tab） | 使用者（跑） / Claude（驗證） | 待辦，等 Full/Down/Up 素材到位；checkpoint 預期不會認得 tab_stroke |
-| 第二輪訓練（四支影片合併，含 Tab） | 使用者（跑） / Claude（驗證） | 待辦，等 Tab 素材到位後重跑 |
+| 撰寫訓練腳本（論文方法，輸出 7 類） | Claude | ✅ `train.py` 完成：`python train.py --data-dir data`，每個 epoch 印出 loss 與驗證準確率，結束時印出各類別 precision/recall/F1 與混淆矩陣，存成 `multi_motion_model_7class.pt`（含權重、歸一化數值、標籤順序） |
+| 執行訓練（本機 RTX 4060；四支影片 CPU 上一個 epoch 約 20 秒，GPU 會更快） | 使用者（跑） / Claude（驗證） | 待辦，等 CSV。CSV 若只到一部分，就先用有 CSV 的影片訓練 |
 | 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | 待辦 |
 | 決定是否達標、要不要再迭代 | 使用者 | 待辦 |
 
@@ -114,7 +116,7 @@
 
 | 任務 | PIC | 狀態 |
 |---|---|---|
-| 更新 `main.py`（新 checkpoint 路徑、`num_classes=7`） | Claude | 待辦 |
+| 更新 `main.py`：改用 `StrokeBiLSTMModel` 與 `features.py` 的特徵、載入新 checkpoint（含歸一化數值），移除舊模型與舊特徵程式 | Claude | 待辦 |
 | 更新 `pipeline.py`（`_collapse_events`/`_evaluate_hand_predictions` 改成 7 類運算、輸出時過濾掉 hold/none） | Claude | 待辦 |
 | ~~更新 `index.html`~~ → 不需要，JSON schema 沒變 | — | ✅ 已確認不用改 |
 | 端到端瀏覽器測試 | Claude | 待辦 |
@@ -148,6 +150,8 @@
 | 重新訓練後準確率沒有明顯改善 | Phase 4 設計成可迭代，允許回到 Phase 2 重調標籤空間 | 使用者 |
 | 7 類標籤資料量不足（尤其 hold/none 樣本可能偏少） | Phase 4 驗證時特別檢查各類別樣本數與個別準確率 | Claude |
 | 每支影片只有約 480 幀：照規格 step=15 切，四支合計只有約 176 個訓練視窗、24 個驗證視窗 | 訓練用的視窗改成更密的 step（例如 1），推論維持 15；train/val 的緩衝區照舊，不會洩漏。拿到 CSV 看過各類別數量後定案 | Claude |
+| 手腕相對座標會去掉整隻手上下移動的資訊，只留手部相對手腕的姿態變化（論文方法本身的設計） | 照論文做；訓練結果不佳時第一個檢查這裡 | Claude |
+| 像素座標與解析度、長寬比有關：實作一律換算到 1280×720，直式或其他長寬比的上傳影片數值會偏 | Phase 5 部署時用不同解析度的影片實測 | Claude |
 | 手部偵測仍非 100%（Full 左手 87%、Up 右手 91%），抓不到的幀特徵為 0 | 已改追蹤模式大幅改善；訓練後若這兩支影片的準確率偏低，再評估降低信心門檻或補幀 | Claude |
 
 ## 待確認的公開問題

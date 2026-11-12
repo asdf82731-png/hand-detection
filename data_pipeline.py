@@ -2,9 +2,8 @@
 Training data pipeline: CSV label loading, frame alignment, window labeling,
 and train/val split. Spec: TRAINING_DESIGN.md section 1.
 
-Pure logic only — no video I/O here. Callers extract per-hand (62, 9) feature
-blocks per frame (reusing pipeline.preprocess_landmarks_per_hand) and pass the
-resulting list in to windows_to_samples().
+Pure logic only — no video I/O here. Callers extract one array per frame for
+a hand (features.extract_hand_positions) and pass it to windows_to_samples().
 """
 import csv
 import re
@@ -111,11 +110,9 @@ def split_train_val(windows, num_frames, window_size=30, val_fraction=0.2, buffe
 
 def windows_to_samples(hand_features, hand, windows, window_size=30):
     """
-    hand_features: sequence of per-frame (62, 9) feature blocks for one hand
-    (already masked via pipeline.preprocess_landmarks_per_hand), indexed by
-    frame number.
+    hand_features: one array per frame for one hand, indexed by frame number.
 
-    Returns a list of (window: np.ndarray[window_size, 62, 9], hand: str, label: int).
+    Returns a list of (window: np.ndarray[window_size, ...], hand: str, label: int).
     """
     samples = []
     for start, label in windows:
