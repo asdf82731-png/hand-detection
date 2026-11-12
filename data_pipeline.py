@@ -47,20 +47,37 @@ def parse_frame_id(frame_id):
     return int(match.group(1))
 
 
+# The label column is "strike" in the real CSV files and "stroke" in the thesis table.
+_LABEL_COLUMNS = ("strike", "stroke")
+
+
 def load_frame_labels(csv_path):
     """
-    Read a `frame_id, hand, stroke` CSV into {frame_index: {"left": label, "right": label}}.
+    Read a `frame_id, hand, strike` CSV into {frame_index: {"left": label, "right": label}}.
     Frames/hands not present in the CSV are simply absent from the result (see
     TRAINING_DESIGN.md 1.3 — missing frames are excluded, never assumed "none").
+    A frame/hand that appears more than once with different labels is
+    ambiguous and is left out the same way.
     """
     frame_labels = {}
-    with open(csv_path, newline="") as f:
+    conflicts = set()
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
+        label_column = next((c for c in _LABEL_COLUMNS if c in (reader.fieldnames or [])), None)
+        if label_column is None:
+            raise ValueError(f"{csv_path}: no label column (expected one of {_LABEL_COLUMNS}), got {reader.fieldnames}")
         for row in reader:
             frame_idx = parse_frame_id(row["frame_id"])
             hand = row["hand"].strip().lower()
-            label = normalize_label(row["stroke"])
-            frame_labels.setdefault(frame_idx, {})[hand] = label
+            if hand not in ("left", "right"):
+                raise ValueError(f"{csv_path}: unknown hand {row['hand']!r} for {row['frame_id']}")
+            label = normalize_label(row[label_column])
+            hands = frame_labels.setdefault(frame_idx, {})
+            if hands.get(hand, label) != label:
+                conflicts.add((frame_idx, hand))
+            hands[hand] = label
+    for frame_idx, hand in conflicts:
+        del frame_labels[frame_idx][hand]
     return frame_labels
 
 

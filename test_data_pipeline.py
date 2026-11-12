@@ -42,14 +42,51 @@ class TestNormalizeLabel(unittest.TestCase):
 
 
 class TestFrameAlignment(unittest.TestCase):
-    def _write_csv(self, rows):
+    def _write_csv(self, rows, label_column="strike"):
         fd, path = tempfile.mkstemp(suffix=".csv")
         os.close(fd)
         with open(path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["frame_id", "hand", "stroke"])
+            writer.writerow(["frame_id", "hand", label_column])
             writer.writerows(rows)
         return path
+
+    def test_label_column_may_be_strike_or_stroke(self):
+        # The real CSV files name the column "strike"; the thesis table says
+        # "stroke". Reading only one of them fails on the other.
+        for column in ("strike", "stroke"):
+            path = self._write_csv([("frame_0003.jpg", "left", "up_hold")], label_column=column)
+            try:
+                self.assertEqual(load_frame_labels(path)[3]["left"], "up_hold")
+            finally:
+                os.remove(path)
+
+    def test_missing_label_column_raises(self):
+        path = self._write_csv([("frame_0003.jpg", "left", "up_hold")], label_column="action")
+        try:
+            with self.assertRaises(ValueError):
+                load_frame_labels(path)
+        finally:
+            os.remove(path)
+
+    def test_conflicting_duplicate_rows_leave_that_hand_unlabeled(self):
+        # The real CSVs contain frames where the same hand is listed twice.
+        # If the two rows disagree there is no way to know which is right, so
+        # the frame must not be trained on with either label.
+        path = self._write_csv([
+            ("frame_0005.jpg", "left", "down_hold"),
+            ("frame_0005.jpg", "left", "down_strike"),
+            ("frame_0005.jpg", "right", "none"),
+            ("frame_0006.jpg", "left", "down_hold"),
+            ("frame_0006.jpg", "left", "down_hold"),
+        ])
+        try:
+            frame_labels = load_frame_labels(path)
+            self.assertNotIn("left", frame_labels[5])
+            self.assertEqual(frame_labels[5]["right"], "none")
+            self.assertEqual(frame_labels[6]["left"], "down_hold")
+        finally:
+            os.remove(path)
 
     def test_frame_id_parsed_and_aligned_by_index(self):
         path = self._write_csv([
