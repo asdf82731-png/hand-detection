@@ -14,6 +14,20 @@ mp_hands = mp.solutions.hands.Hands(
     min_detection_confidence=0.5
 )
 
+
+def create_hand_tracker():
+    """
+    Tracking-mode MediaPipe Hands. It carries state from frame to frame, so
+    create one per video and feed it that video's frames in order — never
+    share one across videos or requests.
+    """
+    return mp.solutions.hands.Hands(
+        static_image_mode=False,
+        max_num_hands=2,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+
 # 1. Video Validation
 
 def check_video_file(video_path):
@@ -59,6 +73,28 @@ def extract_screenshots(video_path, frame_interval=30):
     cap.release()
     return screenshots
 
+
+_ROTATIONS = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
+
+def read_upright_frames(video_path):
+    """
+    Yield the video's frames the way a player shows them. Phone videos often
+    store the frames rotated together with a rotation tag; whether OpenCV
+    applies that tag depends on how it was built, so its own handling is
+    switched off and the rotation is applied here.
+    """
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
+    rotation = _ROTATIONS.get(int(cap.get(cv2.CAP_PROP_ORIENTATION_META)) % 360)
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        yield frame if rotation is None else cv2.rotate(frame, rotation)
+    cap.release()
+
+
 BONE_CONNECTIONS = [
     (0,1), (1,2), (2,3), (3,4),    # Thumb
     (0,5), (5,6), (6,7), (7,8),     # Index
@@ -67,18 +103,50 @@ BONE_CONNECTIONS = [
     (0,17), (17,18), (18,19), (19,20)  # Pinky
 ]
 
-def _extract_hand_joint_blocks(image):
+# Two detections whose centres are closer than this (normalized image width)
+# are the same physical hand detected twice.
+DUPLICATE_HAND_X_DISTANCE = 0.1
+
+
+def _assign_hand_slots(labels, scores, center_xs):
+    """
+    Decide which slot ("Left"/"Right", or None to drop) each detection fills.
+
+    MediaPipe sometimes gives both hands the same handedness label, which
+    used to make one hand overwrite the other. When that happens: if the two
+    detections sit on top of each other they are one hand seen twice, so only
+    the higher-scoring one is kept; otherwise they are two hands and are
+    split by screen position, matching what MediaPipe itself does on upright
+    frames it labels unambiguously (screen-left hand -> "Left", screen-right
+    -> "Right").
+    """
+    if len(labels) == 2 and labels[0] == labels[1]:
+        if abs(center_xs[0] - center_xs[1]) < DUPLICATE_HAND_X_DISTANCE:
+            keep = 0 if scores[0] >= scores[1] else 1
+            return [labels[i] if i == keep else None for i in range(2)]
+        screen_left = 0 if center_xs[0] < center_xs[1] else 1
+        return ["Left" if i == screen_left else "Right" for i in range(2)]
+    return list(labels)
+
+
+def _extract_hand_joint_blocks(image, hands=mp_hands):
     """Run MediaPipe once and return (left_hand, right_hand), each (21, 9)."""
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = mp_hands.process(image_rgb)
+    results = hands.process(image_rgb)
 
     # Initialize arrays for both hands (21 landmarks each)
     left_hand = np.zeros((21, 9), dtype=np.float32)
     right_hand = np.zeros((21, 9), dtype=np.float32)
 
     if results.multi_hand_landmarks:
-        for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-            hand_type = handedness.classification[0].label
+        slots = _assign_hand_slots(
+            [h.classification[0].label for h in results.multi_handedness],
+            [h.classification[0].score for h in results.multi_handedness],
+            [np.mean([lm.x for lm in hl.landmark]) for hl in results.multi_hand_landmarks],
+        )
+        for hand_landmarks, hand_type in zip(results.multi_hand_landmarks, slots):
+            if hand_type is None:
+                continue
 
             # Extract coordinates (x,y,z) for each landmark
             coords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark])
@@ -148,13 +216,15 @@ def preprocess_landmarks(image):
     return np.vstack([joints, bone_part_padded])
 
 
-def preprocess_landmarks_per_hand(image):
+def preprocess_landmarks_per_hand(image, hands):
     """
     Independent per-hand feature blocks (62, 9) each: the other hand's joints and
     bones are zeroed out so the shared model can be run once per hand and produce
     a genuinely separate left-hand and right-hand prediction.
+
+    `hands` is a tracker from create_hand_tracker(), one per video.
     """
-    left_hand, right_hand = _extract_hand_joint_blocks(image)
+    left_hand, right_hand = _extract_hand_joint_blocks(image, hands)
     zeros_hand = np.zeros((21, 9), dtype=np.float32)
 
     left_only = np.vstack([np.vstack([left_hand, zeros_hand]), _compute_bone_block(left_hand)])
@@ -202,10 +272,8 @@ def _collapse_events(predictions):
     return events
 
 
-def _evaluate_hand_predictions(predictions):
-    """Confusion matrix, per-event counts and accuracy for one hand's own predictions."""
-    events = _collapse_events(predictions)
-
+def _evaluate_hand_events(events):
+    """Confusion matrix, per-event counts and accuracy for one hand's detected events (label indices)."""
     if not events:
         cm = np.zeros((len(LABELS), len(LABELS)), dtype=int)
         counts = {label: 0 for label in LABELS}
@@ -232,8 +300,15 @@ def _evaluate_hand_predictions(predictions):
 
 
 def evaluate_metrics(left_predictions, right_predictions, cm_base_url, vid_id, static_dir):
-    left_cm, left_counts, left_accuracy = _evaluate_hand_predictions(left_predictions)
-    right_cm, right_counts, right_accuracy = _evaluate_hand_predictions(right_predictions)
+    return evaluate_event_metrics(
+        _collapse_events(left_predictions), _collapse_events(right_predictions), cm_base_url, vid_id, static_dir
+    )
+
+
+def evaluate_event_metrics(left_events, right_events, cm_base_url, vid_id, static_dir):
+    """Response fields from each hand's detected stroke events (lists of indices into LABELS)."""
+    left_cm, left_counts, left_accuracy = _evaluate_hand_events(left_events)
+    right_cm, right_counts, right_accuracy = _evaluate_hand_events(right_events)
 
     # Save confusion matrix as image
     def save_cm(cm, hand):
