@@ -11,6 +11,7 @@ from pipeline import (
     extract_screenshots,
     preprocess_landmarks,
     preprocess_landmarks_per_hand,
+    create_hand_tracker,
     create_feature_windows,
     evaluate_metrics
 )
@@ -103,13 +104,14 @@ async def recognize(video_file: UploadFile = File(...)):
         # Process landmarks independently per hand (other hand's data zeroed out)
         left_landmarks = []
         right_landmarks = []
-        for frame in frames:
-            try:
-                left_lm, right_lm = preprocess_landmarks_per_hand(frame)
-            except Exception:
-                left_lm, right_lm = np.zeros((62, 9)), np.zeros((62, 9))
-            left_landmarks.append(left_lm if left_lm.shape == (62, 9) else np.zeros((62, 9)))
-            right_landmarks.append(right_lm if right_lm.shape == (62, 9) else np.zeros((62, 9)))
+        with create_hand_tracker() as hand_tracker:
+            for frame in frames:
+                try:
+                    left_lm, right_lm = preprocess_landmarks_per_hand(frame, hand_tracker)
+                except Exception:
+                    left_lm, right_lm = np.zeros((62, 9)), np.zeros((62, 9))
+                left_landmarks.append(left_lm if left_lm.shape == (62, 9) else np.zeros((62, 9)))
+                right_landmarks.append(right_lm if right_lm.shape == (62, 9) else np.zeros((62, 9)))
 
         print(f"[DEBUG] Total landmark sets extracted: {len(left_landmarks)}")
 
