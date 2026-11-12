@@ -3,33 +3,21 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import os
 import uuid
-import numpy as np
 import torch
-from pipeline import (
-    check_video_file,
-    extract_screenshots,
-    preprocess_landmarks,
-    preprocess_landmarks_per_hand,
-    create_hand_tracker,
-    read_upright_frames,
-    create_feature_windows,
-    evaluate_metrics
-)
-from model import MultiMotionDevLSTMModel
+from pipeline import evaluate_event_metrics
+from inference import load_checkpoint, recognize as recognize_strokes
 
 # === Configuration ===
-MODEL_PATH = os.getenv("MODEL_PATH", "multi_motion_model.pt")
+MODEL_PATH = os.getenv("MODEL_PATH", "multi_motion_model_7class.pt")
 STATIC_DIR = os.getenv("STATIC_DIR", "./static")
 CM_BASE_URL = os.getenv("CM_BASE_URL", "http://localhost:8000/static")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 
-model = MultiMotionDevLSTMModel(num_classes=4)
-state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
-model.load_state_dict(state_dict)  # strict: fail loudly if the architecture ever drifts from the checkpoint again
-
-model.to(DEVICE).eval()
+if not os.path.exists(MODEL_PATH):
+    raise RuntimeError(f"Model checkpoint not found: {MODEL_PATH}. Train it first with train.py (see LOCAL_SETUP.md).")
+model, scaler, hand_to_slot = load_checkpoint(MODEL_PATH, DEVICE)
 print("[INFO] Model weights loaded successfully.")
 
 # === FastAPI Setup ===
@@ -83,68 +71,15 @@ async def recognize(video_file: UploadFile = File(...)):
         with open(temp_path, "wb") as f:
             f.write(await video_file.read())
         
-        # Extract frames
-        frames = list(read_upright_frames(temp_path))
-        print(f"[DEBUG] Total frames extracted: {len(frames)}")
-        
-        window_size = 30
-        if len(frames) < window_size:
-            raise HTTPException(422, f"Video too short (min {window_size} frames required)")
-        
-        # Process landmarks independently per hand (other hand's data zeroed out)
-        left_landmarks = []
-        right_landmarks = []
-        with create_hand_tracker() as hand_tracker:
-            for frame in frames:
-                try:
-                    left_lm, right_lm = preprocess_landmarks_per_hand(frame, hand_tracker)
-                except Exception:
-                    left_lm, right_lm = np.zeros((62, 9)), np.zeros((62, 9))
-                left_landmarks.append(left_lm if left_lm.shape == (62, 9) else np.zeros((62, 9)))
-                right_landmarks.append(right_lm if right_lm.shape == (62, 9) else np.zeros((62, 9)))
-
-        print(f"[DEBUG] Total landmark sets extracted: {len(left_landmarks)}")
-
-        def build_windows(landmarks_list):
-            windows = []
-            for i in range(0, len(landmarks_list) - window_size + 1, window_size // 2):
-                window = np.stack(landmarks_list[i:i+window_size])
-                if window.shape == (window_size, 62, 9):
-                    windows.append(window)
-            return windows
-
-        left_windows = build_windows(left_landmarks)
-        right_windows = build_windows(right_landmarks)
-
-        print(f"[DEBUG] Left windows: {len(left_windows)}, Right windows: {len(right_windows)}")
-        if not left_windows or not right_windows:
-            raise HTTPException(422, "No valid windows created")
-
-        # Model inference
-        model.eval()
-
-        def run_inference(windows):
-            predictions = []
-            for window in windows:
-                try:
-                    input_tensor = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
-                    with torch.no_grad():
-                        output = model(input_tensor)
-                    predictions.append(output.numpy())
-                except Exception as e:
-                    print(f"[ERROR] Prediction failed: {e}")
-                    continue
-            return predictions
-
-        left_predictions = run_inference(left_windows)
-        right_predictions = run_inference(right_windows)
-
-        print(f"[DEBUG] Left predictions: {len(left_predictions)}, Right predictions: {len(right_predictions)}")
-        if not left_predictions or not right_predictions:
-            raise HTTPException(422, "No valid predictions")
+        # Per-hand stroke events from the 7-class model
+        try:
+            events = recognize_strokes(temp_path, model, scaler, hand_to_slot, DEVICE)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        print(f"[DEBUG] Stroke events - left: {len(events['left'])}, right: {len(events['right'])}")
 
         # Process results
-        results = evaluate_metrics(left_predictions, right_predictions, CM_BASE_URL, vid_id, STATIC_DIR)
+        results = evaluate_event_metrics(events["left"], events["right"], CM_BASE_URL, vid_id, STATIC_DIR)
         return JSONResponse(content={"status": "success", **results})
     
     except HTTPException:

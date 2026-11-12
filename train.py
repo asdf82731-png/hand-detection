@@ -1,7 +1,8 @@
 """
 Train the 7-class stroke model with the thesis method (see TRAINING_DESIGN.md).
 
-    python train.py --data-dir data
+    python check_data.py --data-dir data          (first: checks the data, says which --csv-left-slot to use)
+    python train.py --data-dir data --csv-left-slot left
 
 `data/` holds, for each of Full/Down/Up/Tab, the label file <Name>.csv plus
 either a folder <Name>/ of frame images (frame_0026.jpg, ...) or a video
@@ -30,11 +31,23 @@ BATCH_SIZE = 32
 LEARNING_RATE = 1e-3
 CHECKPOINT_PATH = "multi_motion_model_7class.pt"
 
-# Which tracker slot (features.HANDS) each CSV `hand` value refers to. Must be
-# confirmed against the real CSVs before training — a swapped mapping trains
-# every sample on the other hand's label without any error. Saved in the
-# checkpoint so inference reports left/right the same way the labels did.
-CSV_HAND_TO_SLOT = None
+
+
+def data_sources(data_dir, name):
+    """(frames source, csv path) for one action: a frame folder if present, else the video."""
+    frames_dir = os.path.join(data_dir, name)
+    source = frames_dir if os.path.isdir(frames_dir) else os.path.join(data_dir, f"{name}.mp4")
+    return source, os.path.join(data_dir, f"{name}.csv")
+
+
+def hand_mapping(csv_left_slot):
+    """
+    Which tracker slot (features.HANDS) each CSV `hand` value refers to. A
+    swapped mapping trains every sample on the other hand's label without any
+    error, so it has no default: check_data.py works it out from the data. It
+    is saved in the checkpoint so inference reports left/right the same way.
+    """
+    return {"left": csv_left_slot, "right": "right" if csv_left_slot == "left" else "left"}
 
 
 def load_split_windows(data_dir, csv_hand_to_slot):
@@ -42,17 +55,11 @@ def load_split_windows(data_dir, csv_hand_to_slot):
     Returns (train, val): lists of (joint_window, bone_window, slot, label)
     built from every video in data_dir that has a CSV.
     """
-    if csv_hand_to_slot is None:
-        raise ValueError("CSV_HAND_TO_SLOT is not set: confirm which tracker slot the CSV's left/right refer to first.")
-
     train, val = [], []
     for name in VIDEO_NAMES:
-        frames_dir = os.path.join(data_dir, name)
-        video_path = os.path.join(data_dir, f"{name}.mp4")
-        csv_path = os.path.join(data_dir, f"{name}.csv")
-        source = frames_dir if os.path.isdir(frames_dir) else video_path
+        source, csv_path = data_sources(data_dir, name)
         if not (os.path.exists(source) and os.path.exists(csv_path)):
-            print(f"[SKIPPED] {name}: need {csv_path} and either {frames_dir}/ or {video_path}")
+            print(f"[SKIPPED] {name}: need {csv_path} and either a {name}/ frame folder or {name}.mp4 in {data_dir}")
             continue
 
         positions, detection_rate = extract_hand_positions(source)
@@ -163,10 +170,15 @@ def fit(train_set, val_set, device, epochs=EPOCHS):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data")
+    parser.add_argument(
+        "--csv-left-slot", required=True, choices=["left", "right"],
+        help="which detected hand the CSV's 'left' rows describe; check_data.py prints the value to use",
+    )
     args = parser.parse_args()
+    csv_hand_to_slot = hand_mapping(args.csv_left_slot)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_windows, val_windows = load_split_windows(args.data_dir, CSV_HAND_TO_SLOT)
+    train_windows, val_windows = load_split_windows(args.data_dir, csv_hand_to_slot)
     print(f"train windows: {len(train_windows)}, val windows: {len(val_windows)}, device: {device}")
     for split_name, windows in (("train", train_windows), ("val", val_windows)):
         counts = np.bincount([label for *_, label in windows], minlength=len(LABELS))
@@ -176,7 +188,7 @@ def main():
     best_state, best_accuracy = fit(to_dataset(train_windows, scaler), to_dataset(val_windows, scaler), device)
 
     torch.save(
-        {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": CSV_HAND_TO_SLOT},
+        {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot},
         CHECKPOINT_PATH,
     )
     print(f"saved {CHECKPOINT_PATH} (best val_acc={best_accuracy:.3f})")

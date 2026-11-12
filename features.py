@@ -4,8 +4,7 @@ pixel coordinates, interpolation of missing joints, wrist-relative
 normalization, and per-window position / velocity / acceleration features for
 joints and bones.
 
-Used by train.py. main.py still serves the old checkpoint with the old
-features in pipeline.py until the retrained checkpoint is deployed.
+Shared by training (train.py) and inference (inference.py).
 """
 import os
 
@@ -95,12 +94,11 @@ def iter_frames(source):
         yield from enumerate(read_upright_frames(source))
 
 
-def extract_hand_positions(source):
+def extract_raw_hand_coords(source):
     """
-    Video file or frame-image directory ->
-    ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates), where N is
-    the highest frame index + 1. Positions are interpolated and
-    wrist-relative, ready for window_features().
+    Video file or frame-image directory -> {"left": (N, 21, 3), "right": ...}
+    in reference-frame pixels, NaN where the hand was not detected. N is the
+    highest frame index + 1.
     """
     detected = {hand: {} for hand in HANDS}
     last_index = -1
@@ -114,14 +112,28 @@ def extract_hand_positions(source):
     if last_index < 0:
         raise ValueError(f"No frames could be read from {source}")
 
-    positions, detection_rate = {}, {}
+    raw = {}
     for hand in HANDS:
-        raw = np.full((last_index + 1, 21, 3), np.nan, dtype=np.float32)
+        raw[hand] = np.full((last_index + 1, 21, 3), np.nan, dtype=np.float32)
         for index, coords in detected[hand].items():
-            raw[index] = coords
-        detection_rate[hand] = len(detected[hand]) / (last_index + 1)
-        positions[hand] = wrist_relative(fill_missing(raw))
-    return positions, detection_rate
+            raw[hand][index] = coords
+    return raw
+
+
+def detection_rates(raw):
+    """Fraction of frames in which each hand was detected."""
+    return {hand: float((~np.isnan(coords).any(axis=(1, 2))).mean()) for hand, coords in raw.items()}
+
+
+def extract_hand_positions(source):
+    """
+    Video file or frame-image directory ->
+    ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates). Positions
+    are interpolated and wrist-relative, ready for window_features().
+    """
+    raw = extract_raw_hand_coords(source)
+    positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
+    return positions, detection_rates(raw)
 
 
 def _with_velocity_and_acceleration(values):

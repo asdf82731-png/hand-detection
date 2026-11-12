@@ -1,10 +1,7 @@
 """
 Inference with the retrained 7-class checkpoint written by train.py: video (or
 frame folder) -> each hand's detected strokes, ready for
-pipeline.evaluate_event_metrics().
-
-main.py does not use this yet; the service switches over once a real
-checkpoint has been trained.
+pipeline.evaluate_event_metrics(). Used by main.py.
 """
 import numpy as np
 import torch

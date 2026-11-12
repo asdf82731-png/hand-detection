@@ -1,6 +1,6 @@
 # Roadmap — 手部揮擊動作辨識系統
 
-最後更新：2026-11-12（影片帶 180° 旋轉標記的問題已修正；部署端推論程式已備妥；仍缺 CSV 與標註用的逐幀圖片）
+最後更新：2026-11-12（改採地端執行：資料留在使用者電腦，照 `LOCAL_SETUP.md` 檢查資料、訓練、啟動服務）
 
 這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。Phase 2/3 的實作細節另見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md)。
 
@@ -20,6 +20,7 @@
 - **訓練環境**：使用者有本機 GPU（RTX 4060）可用，Phase 4 訓練可行，不需要依賴 Colab。
 - **商業方向**：確認鎖定個人消費者練習 App。
 - **研究方法對齊論文（2026-11-12）**：逐項對照論文第三、四章後，決定「類別數維持 7 類、train/val 維持按時間切分，其餘全部照論文」。對照表與實作決定見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md) 第 0 節。
+- **改採地端執行（2026-11-12）**：CSV 與標註用的逐幀圖片都在使用者電腦上，改成由使用者在本機執行檢查、訓練與服務，只把終端機輸出的文字（與小張預覽圖）貼回來。操作步驟見 [`LOCAL_SETUP.md`](./LOCAL_SETUP.md)。
 
 ## 關鍵假設
 
@@ -52,13 +53,13 @@
 |---|---|---|
 | ~~壓縮影片~~ → 不需要了：環境已開放 Drive 下載主機（2026-11-12），只要檔案是「知道連結的任何人都能檢視」，原始大小的影片也能直接抓 | — | ✅ 已解除 |
 | 四支「edit ver」影片 | 使用者 | ✅ 全部取得：Full 466 幀、Down 503 幀、Up 478 幀、Tab 486 幀，皆為 1280×720、29.97fps。⚠️ 但 CSV 的幀編號遠超過這些幀數，見下方「2026-11-12 發現：CSV 與影片對不上」 |
-| 重新上傳四份 CSV（`Full_strike_processed.csv`、`down_stroke_data_1k.csv`、`Up_strike_processed.csv`、`Tab_processed.csv`） | 使用者 | ⚠️ 待辦。先前是以 zip 直接上傳到對話，檔案已隨舊環境消失；Drive 上的三份副本也都不存在了。直接附加到對話即可 |
-| 提供 CSV 標註時實際使用的逐幀圖片（`frame_XXXX.jpg`）或抽出這些圖片的影片 | 使用者 | ⚠️ 待辦——目前真正卡住訓練的項目。`Down edit ver.7z`（43.7MB）很可能就是 Down 的圖片集，但目前是限制存取；另外三個動作需要對應的檔案 |
+| ~~重新上傳四份 CSV~~ → 改成放在本機 `data/`（見 `LOCAL_SETUP.md` 第 3 節） | 使用者 | ⚠️ 待辦 |
+| 找出 CSV 標註時實際使用的逐幀圖片（或抽出它們的影片），放進本機 `data/` | 使用者 | ⚠️ 待辦——目前真正卡住訓練的項目。`Down edit ver.7z` 已下載檢查：裡面是四支 edit ver 影片，與已取得的完全相同，不是圖片集 |
 | ~~決定手部偵測設定~~ → 已定案：改用追蹤模式 | 使用者 | ✅ 已確認 |
 | 實作追蹤模式 + 同標籤時依畫面位置分配（`pipeline.py`、`main.py`、`test_pipeline.py`） | Claude | ✅ 完成，14 項單元測試全過，伺服器端到端上傳測試通過 |
 | 檢查影片幀數 | Claude | ✅ 完成 |
 | 比對 CSV `frame_id` 範圍與影片幀數 | Claude | ✅ 已比對（用先前 session 的紀錄）：對不上，見下方發現 |
-| 用 CSV 與手部動作量確認「CSV 的 left/right」對應 MediaPipe 的哪個標籤 | Claude | 待辦，等 CSV 與對應的圖片／影片 |
+| 在本機執行 `python check_data.py --data-dir data`，把輸出貼給 Claude | 使用者 | ⚠️ 待辦。檢查幀編號是否對得上、偵測率、畫面方向、CSV 的 left/right 對應哪一邊 |
 | 備案：若仍下載失敗，改用本機抽幀上傳關鍵幀圖片 | 使用者+Claude | 待辦 |
 
 ### 2026-11-12 發現：CSV 與影片對不上
@@ -132,7 +133,7 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 | 用真實影片接上 `data_pipeline.py`、實際組出訓練樣本 | Claude | ✅ `train.py` 的 `load_split_windows()` 完成，用四支真實影片 + 假造標籤試跑通過（三支影片約 1714 個訓練視窗、226 個驗證視窗）；缺 CSV 的影片會明確顯示跳過 |
 | 照論文方法重寫特徵抽取（像素座標、插值補幀、手腕相對座標、時間上的速度與加速度、骨骼向量、歸一化、步長 1） | Claude | ✅ `features.py` + `test_features.py`，11 項測試全過 |
 | 訓練程式支援直接讀逐幀圖片資料夾（`data/<動作>/frame_XXXX.jpg`），幀編號取自檔名 | Claude | ✅ 完成；同一支影片「直接讀」與「拆成圖片再讀」的手部位置中位數差約 1 像素 |
-| 用真實 CSV 確認「CSV 的 left/right」對應 MediaPipe 的哪一邊，填入 `train.py` 的 `CSV_HAND_TO_SLOT` | Claude | 待辦，等 CSV；未設定時 `train.py` 會直接報錯，不會用猜的訓練 |
+| 資料檢查腳本：核對 CSV 與畫面、偵測率、左右手對應（動作量推測 + 預覽圖肉眼確認） | Claude | ✅ `check_data.py` + `test_check_data.py`。左右手對應改成 `train.py` 的必填參數 `--csv-left-slot`，沒給就不會訓練。動作量推測只是建議：用假標籤測試時它也給出了看似明確的建議，所以以預覽圖為準 |
 
 ## Phase 3 — 架構修正以配合重訓練
 
@@ -151,7 +152,7 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 |---|---|---|
 | 撰寫訓練腳本（論文方法，輸出 7 類） | Claude | ✅ `train.py` 完成：`python train.py --data-dir data`，每個 epoch 印出 loss 與驗證準確率，結束時印出各類別 precision/recall/F1 與混淆矩陣，存成 `multi_motion_model_7class.pt`（含權重、歸一化數值、標籤順序） |
 | 補上論文的評估指標 AUC-ROC（一對多） | Claude | ✅ 訓練結束時與 precision/recall/F1、混淆矩陣一起印出 |
-| 執行訓練（本機 RTX 4060；四支影片 CPU 上一個 epoch 約 20 秒，GPU 會更快） | 使用者（跑） / Claude（驗證） | 待辦，等 CSV。CSV 若只到一部分，就先用有 CSV 的影片訓練 |
+| 執行訓練：`python train.py --data-dir data --csv-left-slot <left 或 right>`，把輸出貼給 Claude | 使用者（跑） / Claude（判讀） | 待辦，等資料檢查通過 |
 | 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | 待辦 |
 | 決定是否達標、要不要再迭代 | 使用者 | 待辦 |
 
@@ -162,7 +163,9 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 | 任務 | PIC | 狀態 |
 |---|---|---|
 | 新模型的推論程式：影片 → 每隻手的 7 類逐幀預測 → 揮擊事件（hold/none 只用來分隔、不計數，短於 3 個視窗的閃爍忽略） | Claude | ✅ `inference.py` + `test_inference.py` 完成，用假標籤訓練的試跑模型跑通整條流程（478 幀影片 CPU 約 10 秒）。「3 個視窗」是未調校的預設值，真模型出來後再調 |
-| 把 `main.py` 切換到 `inference.py`、載入新 checkpoint，移除舊模型與舊特徵程式 | Claude | 待辦，等真的 checkpoint（約 20 行的改動） |
+| 把 `main.py` 切換到 `inference.py`、載入新 checkpoint | Claude | ✅ 完成。服務啟動時讀 `multi_motion_model_7class.pt`，檔案不存在會直接報錯；用試跑模型上傳影片測試通過 |
+| 移除已不再使用的舊模型與舊特徵程式（`MultiMotionDevLSTMModel`、`pipeline.py` 的舊特徵函式、`multi_motion_model.pt`） | Claude | 待辦，等新模型驗證過再刪，先留著方便比較 |
+| 地端操作文件 | Claude | ✅ `LOCAL_SETUP.md`。流程在 Linux 雲端環境驗證過，尚未在使用者的 Windows 電腦上實跑 |
 | `pipeline.py` 的統計函式改成可直接接收事件清單（`evaluate_event_metrics`） | Claude | ✅ 完成，回傳欄位不變 |
 | ~~更新 `index.html`~~ → 不需要，JSON schema 沒變 | — | ✅ 已確認不用改 |
 | 端到端瀏覽器測試 | Claude | 待辦 |
