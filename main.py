@@ -2,7 +2,6 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import os
-import cv2
 import uuid
 import numpy as np
 import torch
@@ -12,6 +11,7 @@ from pipeline import (
     preprocess_landmarks,
     preprocess_landmarks_per_hand,
     create_hand_tracker,
+    read_upright_frames,
     create_feature_windows,
     evaluate_metrics
 )
@@ -84,17 +84,7 @@ async def recognize(video_file: UploadFile = File(...)):
             f.write(await video_file.read())
         
         # Extract frames
-        cap = cv2.VideoCapture(temp_path)
-        frames = []
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if frame is None:
-                print("[DEBUG] Skipped null frame (frame is None)")
-                continue
-            frames.append(frame)
-        cap.release()
+        frames = list(read_upright_frames(temp_path))
         print(f"[DEBUG] Total frames extracted: {len(frames)}")
         
         window_size = 30

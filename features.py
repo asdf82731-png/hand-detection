@@ -7,10 +7,13 @@ joints and bones.
 Used by train.py. main.py still serves the old checkpoint with the old
 features in pipeline.py until the retrained checkpoint is deployed.
 """
+import os
+
 import cv2
 import numpy as np
 
-from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker
+from data_pipeline import parse_frame_id
+from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, read_upright_frames
 
 # x/y are scaled to pixel positions in this frame size (the training videos'
 # own resolution) whatever the input resolution, so the same motion gives the
@@ -72,28 +75,52 @@ def wrist_relative(coords):
     return coords - coords[:, 0:1, :]
 
 
-def extract_hand_positions(video_path):
+_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png")
+
+
+def iter_frames(source):
     """
-    Whole video -> ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates).
-    Positions are interpolated and wrist-relative, ready for window_features().
+    Yield (frame_index, image) in order from a video file or from a directory
+    of frame images. For a directory the index is the number in the file name
+    (frame_0026.jpg -> 26), which is what the label CSV's frame_id refers to.
     """
-    raw = {hand: [] for hand in HANDS}
-    cap = cv2.VideoCapture(video_path)
+    if os.path.isdir(source):
+        names = [n for n in os.listdir(source) if n.lower().endswith(_IMAGE_EXTENSIONS)]
+        for index, name in sorted((parse_frame_id(n), n) for n in names):
+            image = cv2.imread(os.path.join(source, name))
+            if image is None:
+                raise ValueError(f"Cannot read image: {os.path.join(source, name)}")
+            yield index, image
+    else:
+        yield from enumerate(read_upright_frames(source))
+
+
+def extract_hand_positions(source):
+    """
+    Video file or frame-image directory ->
+    ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates), where N is
+    the highest frame index + 1. Positions are interpolated and
+    wrist-relative, ready for window_features().
+    """
+    detected = {hand: {} for hand in HANDS}
+    last_index = -1
     with create_hand_tracker() as tracker:
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            coords = detect_hand_coords(frame, tracker)
+        for index, image in iter_frames(source):
+            last_index = index
+            coords = detect_hand_coords(image, tracker)
             for hand in HANDS:
-                raw[hand].append(coords[hand] if coords[hand] is not None else np.full((21, 3), np.nan, dtype=np.float32))
-    cap.release()
+                if coords[hand] is not None:
+                    detected[hand][index] = coords[hand]
+    if last_index < 0:
+        raise ValueError(f"No frames could be read from {source}")
 
     positions, detection_rate = {}, {}
     for hand in HANDS:
-        stacked = np.stack(raw[hand])
-        detection_rate[hand] = float((~np.isnan(stacked).any(axis=(1, 2))).mean())
-        positions[hand] = wrist_relative(fill_missing(stacked))
+        raw = np.full((last_index + 1, 21, 3), np.nan, dtype=np.float32)
+        for index, coords in detected[hand].items():
+            raw[index] = coords
+        detection_rate[hand] = len(detected[hand]) / (last_index + 1)
+        positions[hand] = wrist_relative(fill_missing(raw))
     return positions, detection_rate
 
 

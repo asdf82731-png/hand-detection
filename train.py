@@ -3,9 +3,11 @@ Train the 7-class stroke model with the thesis method (see TRAINING_DESIGN.md).
 
     python train.py --data-dir data
 
-`data/` holds <Name>.mp4 and <Name>.csv for each of Full/Down/Up/Tab; videos
-without a matching CSV are skipped (and reported). Writes
-multi_motion_model_7class.pt: model weights, feature scaler and label order.
+`data/` holds, for each of Full/Down/Up/Tab, the label file <Name>.csv plus
+either a folder <Name>/ of frame images (frame_0026.jpg, ...) or a video
+<Name>.mp4. An action missing its CSV or its frames is skipped (and reported).
+Writes multi_motion_model_7class.pt: model weights, feature scaler, label
+order and the hand mapping.
 """
 import argparse
 import os
@@ -13,7 +15,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 
 from data_pipeline import LABELS, build_labeled_windows, load_frame_labels, split_train_val, windows_to_samples
@@ -30,7 +32,8 @@ CHECKPOINT_PATH = "multi_motion_model_7class.pt"
 
 # Which tracker slot (features.HANDS) each CSV `hand` value refers to. Must be
 # confirmed against the real CSVs before training — a swapped mapping trains
-# every sample on the other hand's label without any error.
+# every sample on the other hand's label without any error. Saved in the
+# checkpoint so inference reports left/right the same way the labels did.
 CSV_HAND_TO_SLOT = None
 
 
@@ -44,19 +47,21 @@ def load_split_windows(data_dir, csv_hand_to_slot):
 
     train, val = [], []
     for name in VIDEO_NAMES:
+        frames_dir = os.path.join(data_dir, name)
         video_path = os.path.join(data_dir, f"{name}.mp4")
         csv_path = os.path.join(data_dir, f"{name}.csv")
-        if not (os.path.exists(video_path) and os.path.exists(csv_path)):
-            print(f"[SKIPPED] {name}: need both {video_path} and {csv_path}")
+        source = frames_dir if os.path.isdir(frames_dir) else video_path
+        if not (os.path.exists(source) and os.path.exists(csv_path)):
+            print(f"[SKIPPED] {name}: need {csv_path} and either {frames_dir}/ or {video_path}")
             continue
 
-        positions, detection_rate = extract_hand_positions(video_path)
+        positions, detection_rate = extract_hand_positions(source)
         num_frames = len(positions["left"])
         frame_labels = load_frame_labels(csv_path)
         if max(frame_labels) >= num_frames:
             raise ValueError(
-                f"{name}: CSV labels frame {max(frame_labels)} but the video has only {num_frames} frames "
-                "(0-indexed) — the CSV does not line up with this video."
+                f"{name}: CSV labels frame {max(frame_labels)} but {source} has only frames 0-{num_frames - 1} "
+                "— the CSV does not line up with these frames."
             )
 
         for csv_hand, slot in csv_hand_to_slot.items():
@@ -65,7 +70,7 @@ def load_split_windows(data_dir, csv_hand_to_slot):
                 for window, _, label in windows_to_samples(positions[slot], slot, split_windows, WINDOW_SIZE):
                     target.append((*window_features(window), slot, label))
         print(
-            f"[LOADED] {name}: {num_frames} frames, {len(frame_labels)} labeled, "
+            f"[LOADED] {name} from {source}: {num_frames} frames, {len(frame_labels)} labeled, "
             f"detected left {detection_rate['left']:.0%} / right {detection_rate['right']:.0%}"
         )
     if not train or not val:
@@ -98,10 +103,10 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 
 @torch.no_grad()
 def evaluate(model, loader, criterion, device):
-    """Returns (loss, accuracy, true labels, predicted labels)."""
+    """Returns (loss, accuracy, true labels, predicted labels, class probabilities)."""
     model.eval()
     total_loss = 0.0
-    y_true, y_pred = [], []
+    y_true, y_pred, y_prob = [], [], []
     for windows, labels in loader:
         windows = windows.to(device)
         labels = labels.to(device)
@@ -110,8 +115,19 @@ def evaluate(model, loader, criterion, device):
         total_loss += criterion(outputs, labels).item() * windows.size(0)
         y_true.extend(labels.tolist())
         y_pred.extend(outputs.argmax(dim=1).tolist())
+        y_prob.extend(torch.softmax(outputs, dim=1).tolist())
     accuracy = float(np.mean(np.array(y_true) == np.array(y_pred)))
-    return total_loss / len(loader.dataset), accuracy, y_true, y_pred
+    return total_loss / len(loader.dataset), accuracy, y_true, y_pred, np.array(y_prob)
+
+
+def one_vs_rest_auc(y_true, y_prob):
+    """AUC-ROC per class, one-vs-rest (thesis 4.4.2). None where the class or its complement is absent."""
+    y_true = np.asarray(y_true)
+    aucs = {}
+    for class_id, name in enumerate(LABELS):
+        is_class = y_true == class_id
+        aucs[name] = float(roc_auc_score(is_class, y_prob[:, class_id])) if 0 < is_class.sum() < len(y_true) else None
+    return aucs
 
 
 def fit(train_set, val_set, device, epochs=EPOCHS):
@@ -126,18 +142,21 @@ def fit(train_set, val_set, device, epochs=EPOCHS):
     best_accuracy, best_state = -1.0, None
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_accuracy, _, _ = evaluate(model, val_loader, criterion, device)
+        val_loss, val_accuracy, _, _, _ = evaluate(model, val_loader, criterion, device)
         print(f"[epoch {epoch:2d}] train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={val_accuracy:.3f}")
         if val_accuracy > best_accuracy:
             best_accuracy = val_accuracy
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
     model.load_state_dict(best_state)
-    _, _, y_true, y_pred = evaluate(model, val_loader, criterion, device)
+    _, _, y_true, y_pred, y_prob = evaluate(model, val_loader, criterion, device)
     label_ids = list(range(len(LABELS)))
     print(classification_report(y_true, y_pred, labels=label_ids, target_names=LABELS, zero_division=0))
     print("Confusion matrix (rows = true, columns = predicted):")
     print(confusion_matrix(y_true, y_pred, labels=label_ids))
+    print("AUC-ROC, one-vs-rest:")
+    for name, auc in one_vs_rest_auc(y_true, y_prob).items():
+        print(f"  {name:12s} {'not in validation set' if auc is None else f'{auc:.3f}'}")
     return best_state, best_accuracy
 
 
@@ -156,7 +175,10 @@ def main():
     scaler = FeatureScaler.fit([w[0] for w in train_windows], [w[1] for w in train_windows])
     best_state, best_accuracy = fit(to_dataset(train_windows, scaler), to_dataset(val_windows, scaler), device)
 
-    torch.save({"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS}, CHECKPOINT_PATH)
+    torch.save(
+        {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": CSV_HAND_TO_SLOT},
+        CHECKPOINT_PATH,
+    )
     print(f"saved {CHECKPOINT_PATH} (best val_acc={best_accuracy:.3f})")
 
 

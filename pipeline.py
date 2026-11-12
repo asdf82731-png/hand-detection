@@ -73,6 +73,28 @@ def extract_screenshots(video_path, frame_interval=30):
     cap.release()
     return screenshots
 
+
+_ROTATIONS = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
+
+def read_upright_frames(video_path):
+    """
+    Yield the video's frames the way a player shows them. Phone videos often
+    store the frames rotated together with a rotation tag; whether OpenCV
+    applies that tag depends on how it was built, so its own handling is
+    switched off and the rotation is applied here.
+    """
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 0)
+    rotation = _ROTATIONS.get(int(cap.get(cv2.CAP_PROP_ORIENTATION_META)) % 360)
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        yield frame if rotation is None else cv2.rotate(frame, rotation)
+    cap.release()
+
+
 BONE_CONNECTIONS = [
     (0,1), (1,2), (2,3), (3,4),    # Thumb
     (0,5), (5,6), (6,7), (7,8),     # Index
@@ -94,16 +116,16 @@ def _assign_hand_slots(labels, scores, center_xs):
     used to make one hand overwrite the other. When that happens: if the two
     detections sit on top of each other they are one hand seen twice, so only
     the higher-scoring one is kept; otherwise they are two hands and are
-    split by screen position, matching what MediaPipe itself does on frames
-    it labels unambiguously (screen-left hand -> "Right", screen-right ->
-    "Left").
+    split by screen position, matching what MediaPipe itself does on upright
+    frames it labels unambiguously (screen-left hand -> "Left", screen-right
+    -> "Right").
     """
     if len(labels) == 2 and labels[0] == labels[1]:
         if abs(center_xs[0] - center_xs[1]) < DUPLICATE_HAND_X_DISTANCE:
             keep = 0 if scores[0] >= scores[1] else 1
             return [labels[i] if i == keep else None for i in range(2)]
         screen_left = 0 if center_xs[0] < center_xs[1] else 1
-        return ["Right" if i == screen_left else "Left" for i in range(2)]
+        return ["Left" if i == screen_left else "Right" for i in range(2)]
     return list(labels)
 
 
@@ -250,10 +272,8 @@ def _collapse_events(predictions):
     return events
 
 
-def _evaluate_hand_predictions(predictions):
-    """Confusion matrix, per-event counts and accuracy for one hand's own predictions."""
-    events = _collapse_events(predictions)
-
+def _evaluate_hand_events(events):
+    """Confusion matrix, per-event counts and accuracy for one hand's detected events (label indices)."""
     if not events:
         cm = np.zeros((len(LABELS), len(LABELS)), dtype=int)
         counts = {label: 0 for label in LABELS}
@@ -280,8 +300,15 @@ def _evaluate_hand_predictions(predictions):
 
 
 def evaluate_metrics(left_predictions, right_predictions, cm_base_url, vid_id, static_dir):
-    left_cm, left_counts, left_accuracy = _evaluate_hand_predictions(left_predictions)
-    right_cm, right_counts, right_accuracy = _evaluate_hand_predictions(right_predictions)
+    return evaluate_event_metrics(
+        _collapse_events(left_predictions), _collapse_events(right_predictions), cm_base_url, vid_id, static_dir
+    )
+
+
+def evaluate_event_metrics(left_events, right_events, cm_base_url, vid_id, static_dir):
+    """Response fields from each hand's detected stroke events (lists of indices into LABELS)."""
+    left_cm, left_counts, left_accuracy = _evaluate_hand_events(left_events)
+    right_cm, right_counts, right_accuracy = _evaluate_hand_events(right_events)
 
     # Save confusion matrix as image
     def save_cm(cm, hand):

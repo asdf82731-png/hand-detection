@@ -1,12 +1,42 @@
 """
-Unit tests for the hand-slot assignment in pipeline.py. Left/right hand
-identity feeds straight into per-hand training labels and per-hand counts,
-so a detection landing in the wrong slot (or silently overwriting the other
-hand) corrupts both without any error.
+Unit tests for pipeline.py: frame orientation and hand-slot assignment.
+Left/right hand identity feeds straight into per-hand training labels and
+per-hand counts, so an upside-down frame or a detection landing in the wrong
+slot corrupts both without any error.
 """
+import os
 import unittest
 
-from pipeline import _assign_hand_slots
+import numpy as np
+
+from pipeline import _assign_hand_slots, read_upright_frames
+
+TEST_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_data")
+
+
+def _bright_corner(frame):
+    ys, xs = np.nonzero(frame.mean(axis=2) > 128)
+    height, width = frame.shape[:2]
+    return ("top" if ys.mean() < height / 2 else "bottom", "left" if xs.mean() < width / 2 else "right")
+
+
+class TestReadUprightFrames(unittest.TestCase):
+    # The fixtures are 64x48 clips with a white box in the top-left corner of
+    # the stored frames plus a rotation tag, like phone recordings. The
+    # training videos carry a 180-degree tag; read without it, every frame is
+    # upside down and left/right swap sides.
+
+    def test_180_degree_tag_is_applied(self):
+        frames = list(read_upright_frames(os.path.join(TEST_DATA, "rotation_tag_180.mp4")))
+        self.assertEqual(len(frames), 5)
+        self.assertEqual(frames[0].shape[:2], (48, 64))
+        self.assertEqual(_bright_corner(frames[0]), ("bottom", "right"))
+
+    def test_90_degree_tag_turns_the_frame_to_portrait(self):
+        # Expected values are what ffmpeg / a video player shows for this file.
+        frames = list(read_upright_frames(os.path.join(TEST_DATA, "rotation_tag_90.mp4")))
+        self.assertEqual(frames[0].shape[:2], (64, 48))
+        self.assertEqual(_bright_corner(frames[0]), ("bottom", "left"))
 
 
 class TestAssignHandSlots(unittest.TestCase):
@@ -21,8 +51,8 @@ class TestAssignHandSlots(unittest.TestCase):
     def test_same_label_on_two_separate_hands_is_split_by_screen_side(self):
         # Previously both went to the same slot and one hand overwrote the
         # other, leaving the second hand's features all zero for that frame.
-        self.assertEqual(_assign_hand_slots(["Right", "Right"], [0.9, 0.8], [0.22, 0.61]), ["Right", "Left"])
-        self.assertEqual(_assign_hand_slots(["Left", "Left"], [0.9, 0.8], [0.61, 0.22]), ["Left", "Right"])
+        self.assertEqual(_assign_hand_slots(["Right", "Right"], [0.9, 0.8], [0.38, 0.77]), ["Left", "Right"])
+        self.assertEqual(_assign_hand_slots(["Left", "Left"], [0.9, 0.8], [0.77, 0.38]), ["Right", "Left"])
 
     def test_same_label_on_overlapping_detections_keeps_only_the_best(self):
         # Two boxes on one physical hand must not be turned into a fake second
