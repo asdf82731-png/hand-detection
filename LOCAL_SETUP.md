@@ -8,7 +8,7 @@
 
 ## 1. 取得程式
 
-需要先裝好 [Git](https://git-scm.com/) 和 Python 3.9–3.12（論文環境的 3.12 可以）。
+需要先裝好 [Git](https://git-scm.com/) 和 Python 3.9 以上（3.13 也可以）。
 
 ```
 git clone https://github.com/asdf82731-png/hand-detection.git
@@ -131,4 +131,4 @@ git push
 | `MISSING label file` / `MISSING frames` | 檔名或位置不對，對照第 3 節 |
 | 預覽圖是顛倒的 | 圖片當初抽出來時就是顛倒的，告訴 Claude，需要加一步轉正 |
 | `torch.cuda.is_available()` 是 `False` | 重新執行第 2 節的 GPU 版 PyTorch 安裝；或先用 CPU 訓練 |
-| `pip install` 找不到 `mediapipe==0.10.21` | Python 版本要在 3.9–3.12 之間 |
+| `OSError: libEGL.so.1: cannot open shared object file`（Linux） | 安裝系統套件：`sudo apt-get install libegl1 libgles2` |

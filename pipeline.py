@@ -1,6 +1,7 @@
 import os
 import cv2
 import mediapipe as mp
+from mediapipe.tasks.python import BaseOptions, vision
 import numpy as np
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
@@ -8,11 +9,60 @@ import seaborn as sns
 
 # === MediaPipe Hands Setup ===
 
-mp_hands = mp.solutions.hands.Hands(
-    static_image_mode=True,
-    max_num_hands=2,
-    min_detection_confidence=0.5
-)
+HAND_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
+
+# The legacy mp.solutions.hands API this pipeline was built on is gone from
+# current MediaPipe. HandLandmarker runs the same models but reports the
+# opposite handedness label for the same image, so labels are swapped back:
+# the hand slots (and the trained model's left/right features) must not flip.
+_LEGACY_LABEL = {"Left": "Right", "Right": "Left"}
+
+# Tracking mode needs increasing timestamps; frames are fed in order, so a
+# nominal frame period is enough.
+_FRAME_PERIOD_MS = 33
+
+
+class _Hands:
+    """MediaPipe HandLandmarker, static (one image at a time) or tracking (one video's frames in order)."""
+
+    def __init__(self, tracking):
+        self._tracking = tracking
+        self._timestamp_ms = 0
+        self._landmarker = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=HAND_MODEL_PATH),
+            running_mode=vision.RunningMode.VIDEO if tracking else vision.RunningMode.IMAGE,
+            num_hands=2,
+            min_hand_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        ))
+
+    def process(self, image_rgb):
+        """
+        Returns (labels, scores, hand_landmarks), one entry per detected hand:
+        handedness label ("Left"/"Right", legacy convention), its score, and
+        the hand's 21 landmarks (each with .x, .y, .z).
+        """
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(image_rgb))
+        if self._tracking:
+            result = self._landmarker.detect_for_video(image, self._timestamp_ms)
+            self._timestamp_ms += _FRAME_PERIOD_MS
+        else:
+            result = self._landmarker.detect(image)
+        labels = [_LEGACY_LABEL[h[0].category_name] for h in result.handedness]
+        scores = [h[0].score for h in result.handedness]
+        return labels, scores, result.hand_landmarks
+
+    def close(self):
+        self._landmarker.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+mp_hands = _Hands(tracking=False)
 
 
 def create_hand_tracker():
@@ -21,12 +71,7 @@ def create_hand_tracker():
     create one per video and feed it that video's frames in order — never
     share one across videos or requests.
     """
-    return mp.solutions.hands.Hands(
-        static_image_mode=False,
-        max_num_hands=2,
-        min_detection_confidence=0.5,
-        min_tracking_confidence=0.5
-    )
+    return _Hands(tracking=True)
 
 # 1. Video Validation
 
@@ -132,24 +177,20 @@ def _assign_hand_slots(labels, scores, center_xs):
 def _extract_hand_joint_blocks(image, hands=mp_hands):
     """Run MediaPipe once and return (left_hand, right_hand), each (21, 9)."""
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = hands.process(image_rgb)
+    labels, scores, hands_landmarks = hands.process(image_rgb)
 
     # Initialize arrays for both hands (21 landmarks each)
     left_hand = np.zeros((21, 9), dtype=np.float32)
     right_hand = np.zeros((21, 9), dtype=np.float32)
 
-    if results.multi_hand_landmarks:
-        slots = _assign_hand_slots(
-            [h.classification[0].label for h in results.multi_handedness],
-            [h.classification[0].score for h in results.multi_handedness],
-            [np.mean([lm.x for lm in hl.landmark]) for hl in results.multi_hand_landmarks],
-        )
-        for hand_landmarks, hand_type in zip(results.multi_hand_landmarks, slots):
+    if hands_landmarks:
+        slots = _assign_hand_slots(labels, scores, [np.mean([lm.x for lm in hl]) for hl in hands_landmarks])
+        for hand_landmarks, hand_type in zip(hands_landmarks, slots):
             if hand_type is None:
                 continue
 
             # Extract coordinates (x,y,z) for each landmark
-            coords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark])
+            coords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks])
 
             # Calculate velocity (zero for first and last points)
             velocity = np.zeros_like(coords)
