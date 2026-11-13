@@ -30,19 +30,15 @@ def detect_hand_coords(image, hands):
     MediaPipe's handedness slot. x/y in reference-frame pixels, z as MediaPipe
     reports it. `hands` is a tracker from pipeline.create_hand_tracker().
     """
-    results = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    labels, scores, hands_landmarks = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     coords = {"left": None, "right": None}
-    if results.multi_hand_landmarks:
-        slots = _assign_hand_slots(
-            [h.classification[0].label for h in results.multi_handedness],
-            [h.classification[0].score for h in results.multi_handedness],
-            [np.mean([lm.x for lm in hl.landmark]) for hl in results.multi_hand_landmarks],
-        )
-        for hand_landmarks, slot in zip(results.multi_hand_landmarks, slots):
+    if hands_landmarks:
+        slots = _assign_hand_slots(labels, scores, [np.mean([lm.x for lm in hl]) for hl in hands_landmarks])
+        for hand_landmarks, slot in zip(hands_landmarks, slots):
             if slot is None:
                 continue
             coords[_SLOT_TO_HAND[slot]] = np.array(
-                [[lm.x * REFERENCE_WIDTH, lm.y * REFERENCE_HEIGHT, lm.z] for lm in hand_landmarks.landmark],
+                [[lm.x * REFERENCE_WIDTH, lm.y * REFERENCE_HEIGHT, lm.z] for lm in hand_landmarks],
                 dtype=np.float32,
             )
     return coords

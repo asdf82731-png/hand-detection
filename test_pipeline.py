@@ -7,9 +7,10 @@ slot corrupts both without any error.
 import os
 import unittest
 
+import cv2
 import numpy as np
 
-from pipeline import _assign_hand_slots, read_upright_frames
+from pipeline import _assign_hand_slots, mp_hands, read_upright_frames
 
 TEST_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_data")
 
@@ -58,6 +59,20 @@ class TestAssignHandSlots(unittest.TestCase):
         # Two boxes on one physical hand must not be turned into a fake second
         # hand on the other side.
         self.assertEqual(_assign_hand_slots(["Right", "Right"], [0.6, 0.95], [0.22, 0.25]), [None, "Right"])
+
+
+class TestHandednessConvention(unittest.TestCase):
+    # The trained model and the hand slots were built on the labels the old
+    # mp.solutions.hands API gave. MediaPipe's current API labels the same
+    # hand the other way round; if that leaked through, left-hand and
+    # right-hand features and counts would swap without any error.
+
+    def test_label_matches_what_the_legacy_api_reported(self):
+        # mediapipe 0.10.21 (mp.solutions.hands) labelled this photo's single hand "Left".
+        image = cv2.cvtColor(cv2.imread(os.path.join(TEST_DATA, "one_hand.jpg")), cv2.COLOR_BGR2RGB)
+        labels, _, hands_landmarks = mp_hands.process(image)
+        self.assertEqual(labels, ["Left"])
+        self.assertEqual(len(hands_landmarks[0]), 21)
 
 
 if __name__ == "__main__":
