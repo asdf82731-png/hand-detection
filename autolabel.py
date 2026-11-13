@@ -22,6 +22,10 @@ label definitions in TRAINING_DESIGN.md section 6 (thesis 3.5.1, table 4.2):
   These four clips each hold one stroke type, and the wrist alone did not
   tell them apart (ROADMAP.md, 2026-11-13 stroke-type attempts): pass
   --stroke-type to give every hit the type the person knows the clip has.
+  A full or tab clip then also fixes every hold (full holds high, tab holds
+  low, TRAINING_DESIGN.md 5.2): in a clip held at one height the
+  within-video split still cut the holds into two groups (ROADMAP.md,
+  2026-11-14). Down and up clips hold at both heights and keep the rule.
 - Movement that contains no hit (for example returning to the low position
   after an up stroke) is none.
 - Frames where the hand was not detected get no row, so they are left out of
@@ -69,6 +73,9 @@ MERGE_GAP_FRAMES = 2       # still gaps this short do not end a movement
 SEPARATION = 1.0           # high and low still frames must be this far apart (standardized score)...
 MIN_GROUP_SHARE = 0.1      # ...and each be at least this share of still frames, to split within the video
 HIGH_HEIGHT = 1.0          # otherwise: high = wrist this many palm lengths above its lowest point
+
+# --stroke-type clips whose holds are all at one height (see the module docstring).
+FIXED_HOLD = {"full_stroke": "up_hold", "tab_stroke": "down_hold"}
 
 
 def _smooth(values, width=SMOOTH_FRAMES):
@@ -148,7 +155,8 @@ def label_hand(states, detected, fps, stroke_type=None):
     One hand's (N, 2) wrist states and (N,) detected mask -> list of N labels
     (None where the hand was never seen or for frames before it was first
     seen). See the module docstring for the rules. stroke_type, if given,
-    replaces the rule's stroke type for every hit.
+    replaces the rule's stroke type for every hit, and for full and tab
+    also every hold (FIXED_HOLD).
     """
     n = len(states)
     labels = [None] * n
@@ -176,8 +184,9 @@ def label_hand(states, detected, fps, stroke_type=None):
         if height[top] - height[bottom] >= HIT_DROP and abrupt:
             hits.append(last)
 
+    fixed_hold = FIXED_HOLD.get(stroke_type)
     for i in range(n):
-        labels[i] = None if i < first_seen else ("up_hold" if is_high[i] else "down_hold")
+        labels[i] = None if i < first_seen else (fixed_hold or ("up_hold" if is_high[i] else "down_hold"))
     for first, last in _runs(moving):
         segment_hits = [h for h in hits if first <= h <= last]
         if not segment_hits:
@@ -285,7 +294,8 @@ def main():
     label.add_argument("--pose", action="store_true",
                        help="measure the wrist angle against the forearm with the body model (elbows must be in frame)")
     label.add_argument("--stroke-type", choices=[l for l in LABELS if l.endswith("_stroke")],
-                       help="the one stroke type this clip has: every hit gets it instead of the rule's guess")
+                       help="the one stroke type this clip has: every hit gets it instead of the rule's guess; "
+                            "full / tab also make every hold up_hold / down_hold")
     check = commands.add_parser("check", help="compare a pre-labeled CSV with a hand-made one")
     check.add_argument("--auto", required=True)
     check.add_argument("--human", required=True)

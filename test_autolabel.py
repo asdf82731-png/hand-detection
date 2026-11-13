@@ -91,14 +91,32 @@ class TestSequences(unittest.TestCase):
     def test_given_stroke_type_relabels_every_hit_and_leaves_holds_alone(self):
         # --stroke-type: the wrist cannot tell the types apart, so the person
         # names the clip's type; the rules still decide where strokes and
-        # holds are, and only the stroke type is replaced.
+        # holds are, and only the stroke type is replaced. (A down clip holds
+        # at both heights, so its holds keep the rule.)
         s = trace((HIGH, HOLD), (0, FAST), (HIGH, SLOW), (0, FAST), (LIFT, 4), (0, FAST),
                   (0, HOLD), start=HIGH)
         guessed = labels_of(s)
-        given = label_hand(s, np.ones(len(s), dtype=bool), FPS, stroke_type="tab_stroke")
-        expected = ["tab_stroke" if g.endswith("_stroke") else g for g in guessed]
+        given = label_hand(s, np.ones(len(s), dtype=bool), FPS, stroke_type="down_stroke")
+        expected = ["down_stroke" if g.endswith("_stroke") else g for g in guessed]
         self.assertEqual(given, expected)
         self.assertGreaterEqual(len(strokes(guessed)), 3)
+        self.assertEqual({given[5], given[-5]}, {"up_hold", "down_hold"})
+
+    def test_full_and_tab_clips_fix_every_hold_to_their_one_height(self):
+        # Full holds high and tab holds low by definition (TRAINING_DESIGN.md
+        # 5.2). In the real Tab clip the within-video split still cut the low
+        # holds in two and called hundreds of frames up_hold, so the person's
+        # --stroke-type decides the hold height, not the wrist.
+        s = trace((HIGH, HOLD), (0, FAST), (HIGH, SLOW), (0, FAST), (LIFT, 4), (0, FAST),
+                  (0, HOLD), start=HIGH)
+        detected = np.ones(len(s), dtype=bool)
+        for stroke_type, hold in (("full_stroke", "up_hold"), ("tab_stroke", "down_hold")):
+            guessed = labels_of(s)
+            given = label_hand(s, detected, FPS, stroke_type=stroke_type)
+            expected = [stroke_type if g.endswith("_stroke") else hold if g.endswith("_hold") else g
+                        for g in guessed]
+            self.assertEqual(given, expected)
+            self.assertIn("up_hold" if hold == "down_hold" else "down_hold", guessed)
 
     def test_moving_back_down_after_an_up_stroke_is_none(self):
         # The user's decision: preparation that is not a stroke is none.

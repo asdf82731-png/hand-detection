@@ -233,6 +233,13 @@ Down.csv 的格式和其他三份不同：停頓記在 `motion_label=hold`，`st
 - 修正版：`data\Down_holdfix.csv`、`data\Down_swapped_holdfix.csv`（`hold`+`none` 的列改成 `down_hold`，其他欄位不變，未進 git）。原檔沒動。
 - 用修正版比對 `--stroke-type down_stroke`：kappa 左 / 右手 0.16 / 0.19→0.58 / 0.40，F1 不變。
 
+### 2026-11-14 Full / Tab 的 hold 高低改由 `--stroke-type` 決定
+
+Tab 整支影片都停在低位，但影片內標準化後 `high_mask` 仍切成兩群，down_hold 被標成 up_hold（左手 247 幀、右手 423 幀）。使用者選擇：有給 `--stroke-type` 時，full 的 hold 一律標 up_hold、tab 的一律標 down_hold；down、up 的影片兩種高度都會停，仍照規則。
+
+- kappa（左 / 右手）：Tab 0.12 / 0.31→0.23 / 0.64，Full 0.51 / 0.26→0.52 / 0.27，Down、Up 不變；F1 都不變。
+- 剩下：揮擊起點比人工早 7–9 幀（Full 兩手、Tab 左手），Tab 左手可能有相鄰揮擊沒切開，尚未處理。
+
 ## Phase 5 — 部署新模型
 
 > 詳細規格見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md) 第 3 節——設計後發現 **API JSON 格式跟 `index.html` 其實都不用改**，7 類的 hold/none 只在內部用來讓事件切分更準，對外還是只回報 4 種主動動作的次數跟 Consistency。
