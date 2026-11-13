@@ -129,6 +129,15 @@ uvicorn main:app --port 8000
 - **要「安裝到主畫面」，網址必須是 HTTPS**（瀏覽器的規定；只有 `localhost` 例外）。正式給別人用時，要把服務放在有 HTTPS 的主機或反向代理後面。沒有 HTTPS 時，網頁仍然可以用，只是不能安裝、也不能離線開啟。
 - 安裝方式：Android Chrome 會出現「安裝到主畫面」按鈕；iPhone 用 Safari 開啟後，按分享 → 加入主畫面。
 
+**最快的做法：Cloudflare 臨時通道（免費、不用帳號）**，把電腦上的服務變成一個 HTTPS 網址：
+
+1. 安裝 cloudflared（Windows）：`winget install --id Cloudflare.cloudflared`
+2. 先啟動服務：`uvicorn main:app --port 8000`
+3. 另開一個視窗：`cloudflared tunnel --url http://localhost:8000`
+4. 畫面會印出 `https://<一串字>.trycloudflare.com`，用手機開這個網址，再照上面的方式安裝。
+
+限制：電腦和服務要一直開著，手機才能用；每次重開通道網址都會變，已安裝的 App 就要重新安裝；知道網址的人都能上傳影片。要長期使用，需要固定網址（Cloudflare 帳號加自己的網域建立具名通道，或部署到雲端主機）。
+
 ### 修改 App 介面
 
 介面原始碼在 `frontend/`（React 19 + [Astryx](https://astryx.atmeta.com/docs/getting-started) 元件庫），建置好的檔案在 `webapp/`，伺服器直接提供 `webapp/`，所以只跑伺服器不需要 Node。修改 `frontend/src/` 之後要重新建置（需要 Node 22 以上）：
