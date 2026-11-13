@@ -22,6 +22,7 @@ _LABEL_ALIASES = {
     "down_stroke": "down_stroke",
     "up_stroke": "up_stroke",
     "tab_stroke": "tab_stroke",
+    "tab": "tab_stroke",
     "down_hold": "down_hold",
     "up_hold": "up_hold",
     "none": "none",
@@ -100,16 +101,19 @@ def build_labeled_windows(frame_labels, hand, num_frames, window_size=30, step=1
     return windows
 
 
-def split_train_val(windows, num_frames, window_size=30, val_fraction=0.2, buffer=None):
+def split_train_val(windows, num_frames, window_size=30, val_fraction=0.2, buffer=None, first_frame=0):
     """
     Time-based train/val split (TRAINING_DESIGN.md 1.6). The first
     (1 - val_fraction) fraction of frames is train, the rest is val. Any
     window overlapping the buffer zone around the split point is dropped
     from both sets to prevent leakage from the 50%-overlapping windows.
+
+    The split covers [first_frame, num_frames): pass the labeled range when
+    the labels cover only part of the frames, or val ends up empty.
     """
     if buffer is None:
         buffer = window_size
-    split_point = round(num_frames * (1 - val_fraction))
+    split_point = first_frame + round((num_frames - first_frame) * (1 - val_fraction))
     buffer_start = split_point - buffer
     buffer_end = split_point + buffer
 

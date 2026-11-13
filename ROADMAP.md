@@ -1,6 +1,6 @@
 # Roadmap — 手部揮擊動作辨識系統
 
-最後更新：2026-11-13（PR #2 已合併進 main；仍缺 CSV 標註用的逐幀圖片，且尚未有真實訓練出的模型）
+最後更新：2026-11-13（在使用者電腦上完成第一次 7 類訓練，結果見 Phase 4）
 
 這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。Phase 2/3 的實作細節另見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md)。
 
@@ -41,7 +41,7 @@
 - [x] `TRAINING_DESIGN.md`：Phase 2/3 技術規格文件（資料模型、架構變動、API contract、測試計畫）
 - [x] `model.py`：把 `MultiMotionDevLSTMModel` 等類別從 `main.py` 抽出成共用模組，`main.py` 改成 import，行為不變（已用現有 4 類 checkpoint strict load + forward pass 驗證無迴歸）
 - [x] `data_pipeline.py` + `test_data_pipeline.py`：CSV 標籤正規化、frame 對位（含缺幀排除）、視窗標籤規則（最後一幀）、train/val 無洩漏切分，10 個單元測試全過（純邏輯，合成資料，不依賴真實影片）
-- [x] `train.py`、`features.py`、`inference.py`、`check_data.py`、`LOCAL_SETUP.md`：論文方法的特徵與模型、地端檢查/訓練/服務流程，網頁服務改用新模型（PR #2；尚未用真實標籤訓練，main 上的服務在訓練出 `multi_motion_model_7class.pt` 之前無法啟動）
+- [x] `train.py`、`features.py`、`inference.py`、`check_data.py`、`LOCAL_SETUP.md`：論文方法的特徵與模型、地端檢查/訓練/服務流程，網頁服務改用新模型（PR #2；第一次真實標籤訓練已於 2026-11-13 完成，見 Phase 4）
 
 - [x] 2026-11-13：嘗試讓雲端 session 連到使用者電腦的 `C:\Users\USER\Pictures\video`，Remote Control 可用資料夾清單查了四次都是空的，未成功；改由使用者在本機的 Claude Code session 或自行照 `LOCAL_SETUP.md` 執行。
 
@@ -55,13 +55,13 @@
 |---|---|---|
 | ~~壓縮影片~~ → 不需要了：環境已開放 Drive 下載主機（2026-11-12），只要檔案是「知道連結的任何人都能檢視」，原始大小的影片也能直接抓 | — | ✅ 已解除 |
 | 四支「edit ver」影片 | 使用者 | ✅ 全部取得：Full 466 幀、Down 503 幀、Up 478 幀、Tab 486 幀，皆為 1280×720、29.97fps。⚠️ 但 CSV 的幀編號遠超過這些幀數，見下方「2026-11-12 發現：CSV 與影片對不上」 |
-| ~~重新上傳四份 CSV~~ → 改成放在本機 `data/`（見 `LOCAL_SETUP.md` 第 3 節） | 使用者 | ⚠️ 待辦 |
-| 找出 CSV 標註時實際使用的逐幀圖片（或抽出它們的影片），放進本機 `data/` | 使用者 | ⚠️ 待辦——目前真正卡住訓練的項目。`Down edit ver.7z` 已下載檢查：裡面是四支 edit ver 影片，與已取得的完全相同，不是圖片集 |
+| ~~重新上傳四份 CSV~~ → 改成放在本機 `data/`（見 `LOCAL_SETUP.md` 第 3 節） | 使用者 | ✅ 完成：四份 CSV 在 `Pictures\video\*_csv\` |
+| 找出 CSV 標註時實際使用的逐幀圖片（或抽出它們的影片），放進本機 `data/` | 使用者 | ✅ 完成：`Pictures\video\` 的 `Full strike`、`Down`、`Up`、`Tab` 資料夾（1920×1080，2262–5142 張），四個動作的幀編號都對得上 |
 | ~~決定手部偵測設定~~ → 已定案：改用追蹤模式 | 使用者 | ✅ 已確認 |
 | 實作追蹤模式 + 同標籤時依畫面位置分配（`pipeline.py`、`main.py`、`test_pipeline.py`） | Claude | ✅ 完成，14 項單元測試全過，伺服器端到端上傳測試通過 |
 | 檢查影片幀數 | Claude | ✅ 完成 |
 | 比對 CSV `frame_id` 範圍與影片幀數 | Claude | ✅ 已比對（用先前 session 的紀錄）：對不上，見下方發現 |
-| 在本機執行 `python check_data.py --data-dir data`，把輸出貼給 Claude | 使用者 | ⚠️ 待辦。檢查幀編號是否對得上、偵測率、畫面方向、CSV 的 left/right 對應哪一邊 |
+| 在本機執行 `python check_data.py --data-dir data`，把輸出貼給 Claude | Claude（在使用者電腦上） | ✅ 完成：幀編號對得上；Tab.csv 的標籤寫 `tab`，已加進標籤對照表 |
 | 備案：若仍下載失敗，改用本機抽幀上傳關鍵幀圖片 | 使用者+Claude | 待辦 |
 
 ### 2026-11-12 發現：CSV 與影片對不上
@@ -154,9 +154,31 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 |---|---|---|
 | 撰寫訓練腳本（論文方法，輸出 7 類） | Claude | ✅ `train.py` 完成：`python train.py --data-dir data`，每個 epoch 印出 loss 與驗證準確率，結束時印出各類別 precision/recall/F1 與混淆矩陣，存成 `multi_motion_model_7class.pt`（含權重、歸一化數值、標籤順序） |
 | 補上論文的評估指標 AUC-ROC（一對多） | Claude | ✅ 訓練結束時與 precision/recall/F1、混淆矩陣一起印出 |
-| 執行訓練：`python train.py --data-dir data --csv-left-slot <left 或 right>`，把輸出貼給 Claude | 使用者（跑） / Claude（判讀） | 待辦，等資料檢查通過 |
-| 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | 待辦 |
+| 執行訓練：`python train.py --data-dir data --csv-left-slot <left 或 right>`，把輸出貼給 Claude | Claude（在使用者電腦上） | ✅ 完成，兩種對應各跑一次，採用 `right`，見下方「2026-11-13 第一次訓練結果」 |
+| 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | ✅ 第一輪完成：驗證集、未訓練的後段幀、五支混合影片 |
+| 補標註：Up 的上揮、Down 第 1004 幀之後的下揮 | 使用者 | 待辦（使用者決定暫緩） |
 | 決定是否達標、要不要再迭代 | 使用者 | 待辦 |
+
+### 2026-11-13 第一次訓練結果
+
+在使用者電腦上（RTX 4060）訓練。四個動作的訓練視窗共約 6,800 個，驗證視窗約 1,400 個。
+
+- **訓練前修正**：驗證集原本是空的。切分點依整個圖片資料夾的長度計算，但 CSV 只標到前 1,000–1,500 幀，所以全部落在訓練集。已改成只在有標籤的範圍內切分（`split_train_val` 的 `first_frame` 參數）。
+- **左右手對應**：使用者確認 CSV 的 left/right 指鼓手自己的手，採用 `--csv-left-slot right`。
+
+| | `right`（採用） | `left` |
+|---|---|---|
+| 最佳驗證準確率 | 93.7% | 92.2% |
+| full / down / tab 的 F1 | 0.87 / 0.80 / 0.87 | 0.78 / 0.59 / 0.89 |
+| 後段未訓練幀預測成別類的比例：Full / Tab | 約 3% / 約 10% | 約 6% / 約 12% |
+
+**已知限制**
+
+- **認不出上揮**：`Up.csv` 約 2,900 列裡只有 15 列 `up_strike`，訓練時只有 8 個視窗，驗證集 0 個。
+- **Down 樣本少，左右手可能相反**：`Down.csv` 有重複列與缺幀，只切出約 200 個視窗，驗證集只有 16 個下揮。CSV 關節座標與偵測結果比對顯示 Down 的 CSV left 是畫面左邊的手，跟其他三份推測的方向相反；採用 `right` 時 Down 有一隻手在後段幀有 49% 預測成別類。
+- **可能在認影片，不是認動作**：每支影片只有兩種標籤（例如 Full 只有 full / up_hold），驗證準確率有一部分可能來自認出是哪支影片。
+- **混合影片**：手部偵測率只有 23–75%，模型多半預測成 none / hold，揮擊次數偏少；沒有標籤，無法算準確率。
+- `Down_csv\down_stroke_data_raw.csv` 涵蓋到第 4470 幀，但 `stroke=1` 只出現在第 18–1003 幀，後面是沒標而不是 none，不能用來擴充。`Down labeling.csv`（人工標註）只到第 504 幀。
 
 ## Phase 5 — 部署新模型
 
@@ -170,7 +192,7 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 | 地端操作文件 | Claude | ✅ `LOCAL_SETUP.md`。流程在 Linux 雲端環境驗證過，尚未在使用者的 Windows 電腦上實跑 |
 | `pipeline.py` 的統計函式改成可直接接收事件清單（`evaluate_event_metrics`） | Claude | ✅ 完成，回傳欄位不變 |
 | ~~更新 `index.html`~~ → 不需要，JSON schema 沒變 | — | ✅ 已確認不用改 |
-| 端到端瀏覽器測試 | Claude | 待辦 |
+| 端到端瀏覽器測試 | Claude | ✅ 服務載入新 checkpoint，上傳混合影片約 30 秒回傳成功（API 測試，未用瀏覽器點選） |
 | Commit/PR | Claude | 待辦 |
 | 確認合併進 main | 使用者 | 待辦 |
 
