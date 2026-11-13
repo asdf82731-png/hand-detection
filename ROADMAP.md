@@ -1,6 +1,6 @@
 # Roadmap — 手部揮擊動作辨識系統
 
-最後更新：2026-11-12（改採地端執行：資料留在使用者電腦，照 `LOCAL_SETUP.md` 檢查資料、訓練、啟動服務）
+最後更新：2026-11-13（PR #2 已合併進 main；仍缺 CSV 標註用的逐幀圖片，且尚未有真實訓練出的模型）
 
 這份文件會隨著工作項目調整持續更新（勾選完成項目、調整順序、新增/刪除任務），作為這個專案後續開發的追蹤依據。Phase 2/3 的實作細節另見 [`TRAINING_DESIGN.md`](./TRAINING_DESIGN.md)。
 
@@ -28,7 +28,7 @@
 - 只有兩個 PIC：**Claude**（寫程式、改架構、分析、驗證）與**使用者**（提供素材、本機跑長時間訓練、做商業與架構決策）
 - Claude 無法：下載 >10MB 的 Drive 檔案、跑長時間/GPU 訓練、存取使用者本機檔案、做商業決策
 
-## 已完成（Baseline，PR #1，已合併進 main）
+## 已完成（已合併進 main：PR #1 為 baseline，PR #2 為論文方法的訓練流程與地端方案）
 
 - [x] 模型架構修正，讓現有 checkpoint 正確載入（strict load 成功）
 - [x] CORS / 部署相關修正，前後端同源
@@ -41,7 +41,9 @@
 - [x] `TRAINING_DESIGN.md`：Phase 2/3 技術規格文件（資料模型、架構變動、API contract、測試計畫）
 - [x] `model.py`：把 `MultiMotionDevLSTMModel` 等類別從 `main.py` 抽出成共用模組，`main.py` 改成 import，行為不變（已用現有 4 類 checkpoint strict load + forward pass 驗證無迴歸）
 - [x] `data_pipeline.py` + `test_data_pipeline.py`：CSV 標籤正規化、frame 對位（含缺幀排除）、視窗標籤規則（最後一幀）、train/val 無洩漏切分，10 個單元測試全過（純邏輯，合成資料，不依賴真實影片）
-- [x] `train.py`：`MultiMotionDevLSTMModel(num_classes=7)` + 訓練迴圈骨架，合成資料 smoke test 驗證形狀與訓練流程正確；`load_training_samples()` 讀真實影片/CSV 的部分仍是 `NotImplementedError`，卡在 Phase 1
+- [x] `train.py`、`features.py`、`inference.py`、`check_data.py`、`LOCAL_SETUP.md`：論文方法的特徵與模型、地端檢查/訓練/服務流程，網頁服務改用新模型（PR #2；尚未用真實標籤訓練，main 上的服務在訓練出 `multi_motion_model_7class.pt` 之前無法啟動）
+
+- [x] 2026-11-13：嘗試讓雲端 session 連到使用者電腦的 `C:\Users\USER\Pictures\video`，Remote Control 可用資料夾清單查了四次都是空的，未成功；改由使用者在本機的 Claude Code session 或自行照 `LOCAL_SETUP.md` 執行。
 
 ## Phase 1 — 解除重訓練的材料瓶頸
 

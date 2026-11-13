@@ -13,7 +13,6 @@
 ```
 git clone https://github.com/asdf82731-png/hand-detection.git
 cd hand-detection
-git checkout claude/google-drive-read-kfqu9o
 ```
 
 ## 2. 安裝套件
