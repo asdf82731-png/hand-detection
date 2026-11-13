@@ -4,7 +4,7 @@
 
 在你自己的電腦上完成「檢查資料 → 訓練 → 啟動辨識服務」。CSV、逐幀圖片、影片都留在本機，不需要上傳；要給 Claude 看的只有終端機印出的文字，以及幾張小的預覽圖。
 
-> 這份流程在 Linux 的雲端環境驗證過（測試全過、用假標籤完整跑過一輪）。**還沒在你的 Windows 電腦上實際跑過**，第 2 步的安裝指令如果出錯，把錯誤訊息貼給 Claude。
+> 2026-11-13 已在你的 Windows 電腦上完整跑過一次（Python 3.12、PyTorch 2.4.0 + CUDA 12.4、RTX 4060）。
 
 ## 1. 取得程式
 
@@ -13,7 +13,6 @@
 ```
 git clone https://github.com/asdf82731-png/hand-detection.git
 cd hand-detection
-git checkout claude/google-drive-read-kfqu9o
 ```
 
 ## 2. 安裝套件
