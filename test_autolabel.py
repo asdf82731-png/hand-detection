@@ -88,6 +88,18 @@ class TestSequences(unittest.TestCase):
                   (HIGH, HOLD), start=HIGH)
         self.assertEqual(strokes(labels_of(s)), ["full_stroke", "down_stroke", "tab_stroke", "up_stroke"])
 
+    def test_given_stroke_type_relabels_every_hit_and_leaves_holds_alone(self):
+        # --stroke-type: the wrist cannot tell the types apart, so the person
+        # names the clip's type; the rules still decide where strokes and
+        # holds are, and only the stroke type is replaced.
+        s = trace((HIGH, HOLD), (0, FAST), (HIGH, SLOW), (0, FAST), (LIFT, 4), (0, FAST),
+                  (0, HOLD), start=HIGH)
+        guessed = labels_of(s)
+        given = label_hand(s, np.ones(len(s), dtype=bool), FPS, stroke_type="tab_stroke")
+        expected = ["tab_stroke" if g.endswith("_stroke") else g for g in guessed]
+        self.assertEqual(given, expected)
+        self.assertGreaterEqual(len(strokes(guessed)), 3)
+
     def test_moving_back_down_after_an_up_stroke_is_none(self):
         # The user's decision: preparation that is not a stroke is none.
         s = np.concatenate([trace((0, HOLD), (LIFT, 4), (0, FAST), (HIGH, SLOW), (HIGH, HOLD)),

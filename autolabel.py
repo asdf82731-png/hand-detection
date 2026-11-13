@@ -19,6 +19,9 @@ label definitions in TRAINING_DESIGN.md section 6 (thesis 3.5.1, table 4.2):
   where it ends (TRAINING_DESIGN.md 5.2):
       high before, ends high -> full_stroke    high before, ends low -> down_stroke
       low before,  ends high -> up_stroke      low before,  ends low -> tab_stroke
+  These four clips each hold one stroke type, and the wrist alone did not
+  tell them apart (ROADMAP.md, 2026-11-13 stroke-type attempts): pass
+  --stroke-type to give every hit the type the person knows the clip has.
 - Movement that contains no hit (for example returning to the low position
   after an up stroke) is none.
 - Frames where the hand was not detected get no row, so they are left out of
@@ -140,11 +143,12 @@ def _stroke_type(rises_high, ends_high):
             (False, True): "up_stroke", (False, False): "tab_stroke"}[(rises_high, ends_high)]
 
 
-def label_hand(states, detected, fps):
+def label_hand(states, detected, fps, stroke_type=None):
     """
     One hand's (N, 2) wrist states and (N,) detected mask -> list of N labels
     (None where the hand was never seen or for frames before it was first
-    seen). See the module docstring for the rules.
+    seen). See the module docstring for the rules. stroke_type, if given,
+    replaces the rule's stroke type for every hit.
     """
     n = len(states)
     labels = [None] * n
@@ -189,7 +193,7 @@ def label_hand(states, detected, fps):
             start, end = bounds[k], bounds[k + 1]
             rises_high = bool(is_high[start:hit + 1].any())
             ends_high = bool(is_high[end]) if k + 1 < len(segment_hits) else bool(is_high[min(end + 1, n - 1)])
-            stroke = _stroke_type(rises_high, ends_high)
+            stroke = stroke_type or _stroke_type(rises_high, ends_high)
             for i in range(max(start, first_seen), end + 1):
                 labels[i] = stroke
     return labels
@@ -203,10 +207,11 @@ def frame_ids(source, num_frames):
     return [f"frame_{i:04d}.jpg" for i in range(num_frames)]
 
 
-def label_source(source, csv_left_slot, with_pose=False):
+def label_source(source, csv_left_slot, with_pose=False, stroke_type=None):
     """
     Video or frame folder -> [(frame_id, csv hand, label)] rows; csv_left_slot
     as in train.py. with_pose measures the wrist angle against the forearm.
+    stroke_type as in label_hand.
     """
     raw, elbows = extract_raw_tracks(source, with_pose=with_pose)
     fps = video_fps(source) or DEFAULT_FPS
@@ -217,7 +222,8 @@ def label_source(source, csv_left_slot, with_pose=False):
     for csv_hand, slot in slot_for.items():
         coords = raw[slot]
         detected = ~np.isnan(coords).any(axis=(1, 2))
-        per_hand[csv_hand] = label_hand(hand_state(coords, elbows[slot] if with_pose else None), detected, fps)
+        per_hand[csv_hand] = label_hand(hand_state(coords, elbows[slot] if with_pose else None), detected, fps,
+                                     stroke_type)
     rows = []
     for i in range(num_frames):
         for csv_hand in ("left", "right"):
@@ -278,13 +284,15 @@ def main():
     label.add_argument("--out", required=True)
     label.add_argument("--pose", action="store_true",
                        help="measure the wrist angle against the forearm with the body model (elbows must be in frame)")
+    label.add_argument("--stroke-type", choices=[l for l in LABELS if l.endswith("_stroke")],
+                       help="the one stroke type this clip has: every hit gets it instead of the rule's guess")
     check = commands.add_parser("check", help="compare a pre-labeled CSV with a hand-made one")
     check.add_argument("--auto", required=True)
     check.add_argument("--human", required=True)
     args = parser.parse_args()
 
     if args.command == "label":
-        rows = label_source(args.source, args.csv_left_slot, args.pose)
+        rows = label_source(args.source, args.csv_left_slot, args.pose, args.stroke_type)
         with open(args.out, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["frame_id", "hand", "strike"])
