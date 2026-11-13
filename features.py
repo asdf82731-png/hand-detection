@@ -90,17 +90,57 @@ def iter_frames(source):
         yield from enumerate(read_upright_frames(source))
 
 
-def extract_raw_hand_coords(source):
+def source_frame_count(source):
+    """Number of frames a video file or frame-image directory holds (the video's own count may be approximate)."""
+    if os.path.isdir(source):
+        return sum(1 for n in os.listdir(source) if n.lower().endswith(_IMAGE_EXTENSIONS))
+    cap = cv2.VideoCapture(source)
+    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return max(count, 0)
+
+
+def video_fps(source):
+    """Frame rate of a video file; None for a frame-image directory or when the file does not say."""
+    if os.path.isdir(source):
+        return None
+    cap = cv2.VideoCapture(source)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return fps if fps > 0 else None
+
+
+def resample_to_fps(positions, fps, target_fps):
+    """
+    (N, 21, 3) positions sampled at fps -> the same motion sampled at
+    target_fps, by linear interpolation in time. Velocity and acceleration are
+    frame-to-frame differences, so without this a 60fps video gives half the
+    velocity of the same stroke filmed at the 30fps the model was trained on.
+    """
+    positions = np.asarray(positions, dtype=np.float32)
+    if len(positions) < 2:
+        return positions
+    duration = (len(positions) - 1) / fps
+    target_times = np.arange(0.0, duration + 1e-9, 1.0 / target_fps)
+    source_times = np.arange(len(positions)) / fps
+    flat = positions.reshape(len(positions), -1)
+    out = np.stack([np.interp(target_times, source_times, flat[:, k]) for k in range(flat.shape[1])], axis=1)
+    return out.reshape((len(target_times),) + positions.shape[1:]).astype(np.float32)
+
+
+def extract_raw_hand_coords(source, on_frame=None):
     """
     Video file or frame-image directory -> {"left": (N, 21, 3), "right": ...}
     in reference-frame pixels, NaN where the hand was not detected. N is the
-    highest frame index + 1.
+    highest frame index + 1. on_frame(frames_done) is called after each frame.
     """
     detected = {hand: {} for hand in HANDS}
     last_index = -1
     with create_hand_tracker() as tracker:
-        for index, image in iter_frames(source):
+        for done, (index, image) in enumerate(iter_frames(source), start=1):
             last_index = index
+            if on_frame is not None:
+                on_frame(done)
             coords = detect_hand_coords(image, tracker)
             for hand in HANDS:
                 if coords[hand] is not None:
@@ -121,13 +161,13 @@ def detection_rates(raw):
     return {hand: float((~np.isnan(coords).any(axis=(1, 2))).mean()) for hand, coords in raw.items()}
 
 
-def extract_hand_positions(source):
+def extract_hand_positions(source, on_frame=None):
     """
     Video file or frame-image directory ->
     ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates). Positions
     are interpolated and wrist-relative, ready for window_features().
     """
-    raw = extract_raw_hand_coords(source)
+    raw = extract_raw_hand_coords(source, on_frame)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
     return positions, detection_rates(raw)
 

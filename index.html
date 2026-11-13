@@ -137,10 +137,12 @@
 
     <div class="upload-area">
       <p><strong>Upload a hand-strike video file (mp4/mov/avi):</strong></p>
-      <input type="file" id="fileInput" accept=".mp4,.mov,.avi"/>
+      <input type="file" id="fileInput" accept=".mp4,.mov,.avi" onchange="previewVideo()"/>
       <br />
       <button onclick="uploadVideo()">Upload & Predict</button>
       <div class="loading-bar"><div id="progressBar"></div></div>
+      <p id="progressText" class="note"></p>
+      <video id="preview" controls hidden style="max-width: 100%; margin-top: 10px; border-radius: 6px;"></video>
     </div>
 
     <div class="grid">
@@ -179,6 +181,42 @@
   </div>
 
   <script>
+    let previewUrl = null;
+
+    // Plays the chosen file in the page; nothing is uploaded for this.
+    function previewVideo() {
+      const file = document.getElementById("fileInput").files[0];
+      const video = document.getElementById("preview");
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = file ? URL.createObjectURL(file) : null;
+      video.hidden = !file;
+      if (file) video.src = previewUrl;
+    }
+
+    function setProgress(fraction, text) {
+      document.getElementById("progressBar").style.width = Math.round(fraction * 100) + "%";
+      document.getElementById("progressText").textContent = text;
+    }
+
+    function showResults(data) {
+      document.getElementById("leftActions").textContent = JSON.stringify(data.left_hand_counts, null, 2);
+      document.getElementById("rightActions").textContent = JSON.stringify(data.right_hand_counts, null, 2);
+      document.getElementById("leftAccuracy").textContent = JSON.stringify(data.left_hand_accuracy, null, 2);
+      document.getElementById("rightAccuracy").textContent = JSON.stringify(data.right_hand_accuracy, null, 2);
+      document.getElementById("leftCM").src = data.left_confusion_matrix_url;
+      document.getElementById("rightCM").src = data.right_confusion_matrix_url;
+
+      const suggestionList = document.getElementById("suggestionsList");
+      suggestionList.innerHTML = "";
+      data.suggestions.forEach(text => {
+        const li = document.createElement("li");
+        li.textContent = text;
+        suggestionList.appendChild(li);
+      });
+    }
+
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
     async function uploadVideo() {
       const input = document.getElementById("fileInput");
       const file = input.files[0];
@@ -186,44 +224,36 @@
 
       const formData = new FormData();
       formData.append("video_file", file);
-      document.getElementById("progressBar").style.width = "30%";
+      setProgress(0, "Uploading...");
 
       try {
-        const response = await fetch("/recognize", {
-          method: "POST",
-          body: formData,
-        });
-
-        document.getElementById("progressBar").style.width = "70%";
-
-        if (!response.ok) {
-          const err = await response.json();
-          alert("Error: " + err.detail);
-          document.getElementById("progressBar").style.width = "0%";
-          return;
+        const start = await fetch("/jobs", { method: "POST", body: formData });
+        if (!start.ok) {
+          const err = await start.json();
+          setProgress(0, "");
+          return alert("Error: " + err.detail);
         }
+        const { job_id } = await start.json();
 
-        const data = await response.json();
-        document.getElementById("progressBar").style.width = "100%";
-
-        document.getElementById("leftActions").textContent = JSON.stringify(data.left_hand_counts, null, 2);
-        document.getElementById("rightActions").textContent = JSON.stringify(data.right_hand_counts, null, 2);
-        document.getElementById("leftAccuracy").textContent = JSON.stringify(data.left_hand_accuracy, null, 2);
-        document.getElementById("rightAccuracy").textContent = JSON.stringify(data.right_hand_accuracy, null, 2);
-        document.getElementById("leftCM").src = data.left_confusion_matrix_url;
-        document.getElementById("rightCM").src = data.right_confusion_matrix_url;
-
-        const suggestionList = document.getElementById("suggestionsList");
-        suggestionList.innerHTML = "";
-        data.suggestions.forEach(text => {
-          const li = document.createElement("li");
-          li.textContent = text;
-          suggestionList.appendChild(li);
-        });
-
+        while (true) {
+          await sleep(500);
+          const response = await fetch("/jobs/" + job_id);
+          if (!response.ok) throw new Error("Lost track of the analysis (HTTP " + response.status + ")");
+          const job = await response.json();
+          if (job.status === "done") {
+            setProgress(1, "Done");
+            showResults(job.result);
+            return;
+          }
+          if (job.status === "error") {
+            setProgress(0, "");
+            return alert("Error: " + job.detail);
+          }
+          setProgress(job.progress, "Analyzing... " + Math.round(job.progress * 100) + "%");
+        }
       } catch (err) {
+        setProgress(0, "");
         alert("Upload failed: " + err.message);
-        document.getElementById("progressBar").style.width = "0%";
       }
     }
   </script>

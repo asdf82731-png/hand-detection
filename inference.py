@@ -6,10 +6,20 @@ pipeline.evaluate_event_metrics(). Used by main.py.
 import numpy as np
 import torch
 
-from features import FeatureScaler, extract_hand_positions, pack_model_input, window_features
+from features import (
+    FeatureScaler, extract_hand_positions, pack_model_input, resample_to_fps, source_frame_count, video_fps,
+    window_features,
+)
 from model import StrokeBiLSTMModel
 
 WINDOW_SIZE = 30
+# The training footage was filmed at 30fps (thesis 4.2). Uploads at another
+# frame rate are resampled to it so a window spans the same 1 second and
+# velocities mean the same thing; 29.97fps is close enough to leave alone.
+TRAIN_FPS = 30
+FPS_TOLERANCE = 0.02
+# Share of the progress bar given to hand detection; the model takes the rest.
+DETECTION_SHARE = 0.9
 BATCH_SIZE = 64
 
 # Labels 0-3 are the four strokes that get counted (same order as
@@ -68,12 +78,29 @@ def stroke_events(window_labels):
     return events
 
 
-def recognize(source, model, scaler, hand_to_slot, device):
+def to_training_fps(positions, fps):
+    """Resample each hand's positions to TRAIN_FPS unless fps is unknown or already within FPS_TOLERANCE of it."""
+    if fps is None or abs(fps - TRAIN_FPS) / TRAIN_FPS <= FPS_TOLERANCE:
+        return positions
+    return {hand: resample_to_fps(coords, fps, TRAIN_FPS) for hand, coords in positions.items()}
+
+
+def recognize(source, model, scaler, hand_to_slot, device, on_progress=None):
     """
     Video file or frame folder -> {"left": [stroke indices], "right": [...]},
     with left/right meaning what they meant in the training labels.
+    on_progress(fraction) is called as the work advances, ending at 1.0.
     """
-    positions, detection_rate = extract_hand_positions(source)
+    report = on_progress or (lambda fraction: None)
+    total = source_frame_count(source)
+
+    def on_frame(done):
+        if total:
+            report(DETECTION_SHARE * min(done / total, 1.0))
+
+    positions, detection_rate = extract_hand_positions(source, on_frame)
+    positions = to_training_fps(positions, video_fps(source))
+    report(DETECTION_SHARE)
     events = {}
     for hand, slot in hand_to_slot.items():
         if len(positions[slot]) < WINDOW_SIZE:
@@ -82,4 +109,5 @@ def recognize(source, model, scaler, hand_to_slot, device):
             events[hand] = []  # hand never seen: nothing to classify
         else:
             events[hand] = stroke_events(predict_window_labels(positions[slot], slot, model, scaler, device))
+    report(1.0)
     return events
