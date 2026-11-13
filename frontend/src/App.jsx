@@ -14,7 +14,7 @@ import {Section} from '@astryxdesign/core/Section';
 import {Stack} from '@astryxdesign/core/Stack';
 import {Table} from '@astryxdesign/core/Table';
 import {Text} from '@astryxdesign/core/Text';
-import {analyzeVideo, expectedCountsJson, translateSuggestion} from './api.js';
+import {IS_DEMO, analyzeVideo, expectedCountsJson, translateSuggestion} from './api.js';
 import {HANDS, STROKES} from './strokes.js';
 import {loadHistory, saveHistory, clearHistory} from './history.js';
 
@@ -74,6 +74,11 @@ export default function App() {
             onClick={async () => { installPrompt.prompt(); await installPrompt.userChoice; setInstallPrompt(null); }} />
         )}
       </Stack>
+
+      {IS_DEMO && (
+        <Banner status="info" collapsible={false} title="介面示範"
+          description="這個版本沒有連到分析伺服器：影片不會上傳，結果是固定的示意資料。準確率會照你填的練習目標計算。" />
+      )}
 
       <Section variant="muted">
         <Stack gap={3}>
