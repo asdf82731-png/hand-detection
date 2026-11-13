@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from data_pipeline import parse_frame_id
-from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, read_upright_frames
+from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, create_pose_tracker, read_upright_frames
 
 # x/y are scaled to pixel positions in this frame size (the training videos'
 # own resolution) whatever the input resolution, so the same motion gives the
@@ -128,32 +128,83 @@ def resample_to_fps(positions, fps, target_fps):
     return out.reshape((len(target_times),) + positions.shape[1:]).astype(np.float32)
 
 
+# A pose wrist farther than this many palm lengths from the hand's wrist is
+# not that hand's arm.
+ARM_MATCH_PALMS = 2.0
+
+
+def match_elbow(hand_coords, arms):
+    """
+    One detected hand (21, 3) in reference pixels and the pose arms of the same
+    frame [(elbow, wrist)] in normalized coordinates -> that hand's elbow (x, y)
+    in reference pixels, or None. The arm whose wrist is nearest the hand's
+    wrist is taken, if it is within ARM_MATCH_PALMS palm lengths; pose
+    left/right labels are not trusted.
+    """
+    wrist = hand_coords[WRIST, :2]
+    palm = float(np.linalg.norm(hand_coords[MIDDLE_MCP, :2] - wrist)) or 1.0
+    best, best_distance = None, ARM_MATCH_PALMS * palm
+    for elbow, arm_wrist in arms:
+        arm_wrist = np.array([arm_wrist[0] * REFERENCE_WIDTH, arm_wrist[1] * REFERENCE_HEIGHT])
+        distance = float(np.linalg.norm(arm_wrist - wrist))
+        if distance <= best_distance:
+            best = np.array([elbow[0] * REFERENCE_WIDTH, elbow[1] * REFERENCE_HEIGHT], dtype=np.float32)
+            best_distance = distance
+    return best
+
+
+def extract_raw_tracks(source, on_frame=None, with_pose=False):
+    """
+    Video file or frame-image directory -> (hands, elbows):
+    hands {"left": (N, 21, 3), "right": ...} in reference-frame pixels, NaN
+    where the hand was not detected; elbows {"left": (N, 2), ...} likewise,
+    all NaN unless with_pose (the body model makes extraction several times
+    slower: about 4x in one CPU test, including model loading).
+    N is the highest frame index + 1. on_frame(frames_done) is called after
+    each frame.
+    """
+    detected = {hand: {} for hand in HANDS}
+    elbow_found = {hand: {} for hand in HANDS}
+    last_index = -1
+    pose = create_pose_tracker() if with_pose else None
+    try:
+        with create_hand_tracker() as tracker:
+            for done, (index, image) in enumerate(iter_frames(source), start=1):
+                last_index = index
+                if on_frame is not None:
+                    on_frame(done)
+                coords = detect_hand_coords(image, tracker)
+                arms = pose.arms(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)) if pose else []
+                for hand in HANDS:
+                    if coords[hand] is not None:
+                        detected[hand][index] = coords[hand]
+                        elbow = match_elbow(coords[hand], arms) if arms else None
+                        if elbow is not None:
+                            elbow_found[hand][index] = elbow
+    finally:
+        if pose:
+            pose.close()
+    if last_index < 0:
+        raise ValueError(f"No frames could be read from {source}")
+
+    raw, elbows = {}, {}
+    for hand in HANDS:
+        raw[hand] = np.full((last_index + 1, 21, 3), np.nan, dtype=np.float32)
+        for index, coords in detected[hand].items():
+            raw[hand][index] = coords
+        elbows[hand] = np.full((last_index + 1, 2), np.nan, dtype=np.float32)
+        for index, elbow in elbow_found[hand].items():
+            elbows[hand][index] = elbow
+    return raw, elbows
+
+
 def extract_raw_hand_coords(source, on_frame=None):
     """
     Video file or frame-image directory -> {"left": (N, 21, 3), "right": ...}
     in reference-frame pixels, NaN where the hand was not detected. N is the
     highest frame index + 1. on_frame(frames_done) is called after each frame.
     """
-    detected = {hand: {} for hand in HANDS}
-    last_index = -1
-    with create_hand_tracker() as tracker:
-        for done, (index, image) in enumerate(iter_frames(source), start=1):
-            last_index = index
-            if on_frame is not None:
-                on_frame(done)
-            coords = detect_hand_coords(image, tracker)
-            for hand in HANDS:
-                if coords[hand] is not None:
-                    detected[hand][index] = coords[hand]
-    if last_index < 0:
-        raise ValueError(f"No frames could be read from {source}")
-
-    raw = {}
-    for hand in HANDS:
-        raw[hand] = np.full((last_index + 1, 21, 3), np.nan, dtype=np.float32)
-        for index, coords in detected[hand].items():
-            raw[hand][index] = coords
-    return raw
+    return extract_raw_tracks(source, on_frame)[0]
 
 
 def detection_rates(raw):
@@ -171,21 +222,30 @@ def extract_hand_positions(source, on_frame=None):
     return positions, rates
 
 
-def extract_hand_tracks(source, on_frame=None):
+def extract_hand_tracks(source, on_frame=None, with_pose=False):
     """
     Like extract_hand_positions, plus each hand's wrist height and angle:
     returns (positions, hand_states {"left": (N, 2), "right": (N, 2)}, detection rates).
+    with_pose measures the wrist angle against the forearm (see hand_state).
     """
-    raw = extract_raw_hand_coords(source, on_frame)
+    raw, elbows = extract_raw_tracks(source, on_frame, with_pose)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
-    states = {hand: hand_state(coords) for hand, coords in raw.items()}
+    states = {hand: hand_state(coords, elbows[hand] if with_pose else None) for hand, coords in raw.items()}
     return positions, states, detection_rates(raw)
 
 
 WRIST, MIDDLE_MCP = 0, 9
 
 
-def hand_state(raw_coords):
+def _fill_all(values):
+    """(N, K) with NaN rows -> linearly interpolated, held flat before the first and after the last known row."""
+    values = np.asarray(values, dtype=np.float64)
+    known = ~np.isnan(values).any(axis=1)
+    frames = np.arange(len(values))
+    return np.stack([np.interp(frames, frames[known], values[known, k]) for k in range(values.shape[1])], axis=1)
+
+
+def hand_state(raw_coords, elbows=None):
     """
     One hand's raw coordinates (N, 21, 3), NaN where undetected -> (N, 2):
     wrist height and wrist angle per frame.
@@ -198,9 +258,13 @@ def hand_state(raw_coords):
     - Height: how far the wrist is above the lowest wrist position seen in
       this video, in palm lengths (wrist to middle-finger knuckle), so it does
       not depend on how far the camera is.
-    - Angle: direction of the palm (wrist -> middle-finger knuckle) in the
-      image, in radians, 0 = pointing straight up. MediaPipe has no forearm
-      point, so this approximates the wrist angle by the palm's direction.
+    - Angle: with elbows (N, 2) from the body model, the real wrist angle:
+      the signed angle in the image between the forearm (elbow -> wrist) and
+      the hand (wrist -> middle-finger knuckle), in radians, 0 = straight.
+      Frames without an elbow are interpolated from the frames that have one.
+      Without elbows (or none found), the palm's direction in the image
+      (0 = pointing straight up) stands in for it, since the hand model has
+      no forearm point.
 
     Frames are interpolated like the positions; frames before the first
     detection are 0.
@@ -216,7 +280,13 @@ def hand_state(raw_coords):
     lowest = float(wrist_y[detected].max())  # image y grows downward
     first = int(np.flatnonzero(detected)[0])
     states[first:, 0] = (lowest - wrist_y[first:]) / palm_length
-    states[first:, 1] = np.unwrap(np.arctan2(palm[first:, 0], -palm[first:, 1]))
+    if elbows is not None and (~np.isnan(np.asarray(elbows, dtype=np.float32)).any(axis=1)).any():
+        forearm = filled[:, WRIST, :2] - _fill_all(elbows)
+        cross = forearm[:, 0] * palm[:, 1] - forearm[:, 1] * palm[:, 0]
+        dot = (forearm * palm).sum(axis=1)
+        states[first:, 1] = np.unwrap(np.arctan2(cross[first:], dot[first:]))
+    else:
+        states[first:, 1] = np.unwrap(np.arctan2(palm[first:, 0], -palm[first:, 1]))
     return states
 
 

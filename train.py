@@ -16,14 +16,22 @@ same model as before; see TRAINING_DESIGN.md):
     --embedding development   speed-invariant Lie group embedding (model.PathDevelopment)
     --hand-state              add wrist height and angle as inputs (features.hand_state)
     --time-stretch            also train on each window played 0.8x and 1.25x as fast
+    --class-weights           weight the loss so rare classes count as much as common ones
+    --select-by macro_f1      keep the epoch with the best average F1 over classes, not accuracy
+    --pose-angle              with --hand-state: measure the wrist angle against the forearm, using
+                              MediaPipe's body model for the elbow (extraction is several times slower)
+
+--seed (default 0) fixes the random state, so two runs with the same data and
+options give the same model and differences between options can be trusted.
 """
 import argparse
 import os
+import random
 
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import classification_report, confusion_matrix, f1_score, roc_auc_score
 from torch.utils.data import DataLoader, TensorDataset
 
 from data_pipeline import LABELS, build_labeled_windows, load_frame_labels, split_train_val
@@ -87,7 +95,7 @@ def stretched_starts(start):
     return [(end - span, span) for span in spans if end - span >= 0]
 
 
-def load_split_windows(data_dir, csv_hand_to_slot, time_stretch=False):
+def load_split_windows(data_dir, csv_hand_to_slot, time_stretch=False, pose_angle=False):
     """
     Returns (train, val): lists of (joint_window, bone_window, state_window, slot, label)
     built from every video in data_dir that has a CSV.
@@ -104,7 +112,7 @@ def load_split_windows(data_dir, csv_hand_to_slot, time_stretch=False):
         if not (os.path.exists(source) and os.path.exists(csv_path)):
             print(f"[SKIPPED] {name}: need {csv_path} and either a {name}/ frame folder or {name}.mp4 in {data_dir}")
             continue
-        positions, states, detection_rate = extract_hand_tracks(source)
+        positions, states, detection_rate = extract_hand_tracks(source, with_pose=pose_angle)
         num_frames = len(positions["left"])
         frame_labels = load_frame_labels(csv_path)
         if max(frame_labels) >= num_frames:
@@ -188,22 +196,62 @@ def one_vs_rest_auc(y_true, y_prob):
     return aucs
 
 
-def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0):
-    """Trains and returns (best-validation-accuracy weights, that accuracy)."""
+def set_seed(seed):
+    """Fix every random source training uses, so a run can be repeated exactly."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def class_weights(labels, num_classes):
+    """
+    Loss weight per class, inversely proportional to its share of the training
+    windows: total / (classes present * count), so every class present adds
+    up to the same total weight (scikit-learn's "balanced"). Holds and none
+    far outnumber strokes; unweighted, the model can score well by mostly
+    predicting them. Classes absent from training get weight 0.
+    """
+    counts = np.bincount(np.asarray(labels), minlength=num_classes).astype(np.float64)
+    weights = np.zeros(num_classes)
+    present = counts > 0
+    weights[present] = counts[present].sum() / (present.sum() * counts[present])
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+def macro_f1(y_true, y_pred):
+    """Average F1 over the classes present in the validation labels."""
+    present = sorted(set(y_true))
+    return float(f1_score(y_true, y_pred, labels=present, average="macro", zero_division=0)) if present else 0.0
+
+
+def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
+        weighted=False, select_by="accuracy"):
+    """
+    Trains and returns (best weights, their validation score), the best epoch
+    being the one with the highest validation accuracy, or macro-F1 with
+    select_by="macro_f1".
+    """
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE)
 
     model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.CrossEntropyLoss()
+    weight = class_weights(train_set.tensors[-1].numpy(), len(LABELS)).to(device) if weighted else None
+    if weight is not None:
+        print(f"class weights: {dict(zip(LABELS, [round(w, 3) for w in weight.tolist()]))}")
+    criterion = nn.CrossEntropyLoss(weight=weight)
 
-    best_accuracy, best_state = -1.0, None
+    best_score, best_state = -1.0, None
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
-        val_loss, val_accuracy, _, _, _ = evaluate(model, val_loader, criterion, device)
-        print(f"[epoch {epoch:2d}] train_loss={train_loss:.4f} val_loss={val_loss:.4f} val_acc={val_accuracy:.3f}")
-        if val_accuracy > best_accuracy:
-            best_accuracy = val_accuracy
+        val_loss, val_accuracy, y_true, y_pred, _ = evaluate(model, val_loader, criterion, device)
+        val_f1 = macro_f1(y_true, y_pred)
+        print(f"[epoch {epoch:2d}] train_loss={train_loss:.4f} val_loss={val_loss:.4f} "
+              f"val_acc={val_accuracy:.3f} val_macro_f1={val_f1:.3f}")
+        score = val_f1 if select_by == "macro_f1" else val_accuracy
+        if score > best_score:
+            best_score = score
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
     model.load_state_dict(best_state)
@@ -215,7 +263,7 @@ def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state
     print("AUC-ROC, one-vs-rest:")
     for name, auc in one_vs_rest_auc(y_true, y_prob).items():
         print(f"  {name:12s} {'not in validation set' if auc is None else f'{auc:.3f}'}")
-    return best_state, best_accuracy
+    return best_state, best_score
 
 
 def main():
@@ -230,11 +278,20 @@ def main():
     parser.add_argument("--hand-state", action="store_true", help="add wrist height and angle as model inputs")
     parser.add_argument("--time-stretch", action="store_true",
                         help=f"also train on each window played at {TIME_STRETCH_FACTORS}x speed")
+    parser.add_argument("--class-weights", action="store_true", help="weight the loss by inverse class frequency")
+    parser.add_argument("--select-by", default="accuracy", choices=["accuracy", "macro_f1"],
+                        help="validation score used to keep the best epoch")
+    parser.add_argument("--seed", type=int, default=0, help="random seed, for repeatable runs")
+    parser.add_argument("--pose-angle", action="store_true",
+                        help="with --hand-state: wrist angle against the forearm (body model for the elbow)")
     args = parser.parse_args()
+    if args.pose_angle and not args.hand_state:
+        parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
+    set_seed(args.seed)
     csv_hand_to_slot = hand_mapping(args.csv_left_slot)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_windows, val_windows = load_split_windows(args.data_dir, csv_hand_to_slot, args.time_stretch)
+    train_windows, val_windows = load_split_windows(args.data_dir, csv_hand_to_slot, args.time_stretch, args.pose_angle)
     print(f"train windows: {len(train_windows)}, val windows: {len(val_windows)}, device: {device}")
     for split_name, windows in (("train", train_windows), ("val", val_windows)):
         counts = np.bincount([label for *_, label in windows], minlength=len(LABELS))
@@ -245,17 +302,19 @@ def main():
         [w[2] for w in train_windows] if args.hand_state else None,
     )
     state_dim = STATE_DIM if args.hand_state else 0
-    best_state, best_accuracy = fit(
+    best_state, best_score = fit(
         to_dataset(train_windows, scaler, args.hand_state), to_dataset(val_windows, scaler, args.hand_state), device,
-        embedding=args.embedding, state_dim=state_dim,
+        embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
     )
-    config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch}
+    config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
+              "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
+              "pose_angle": args.pose_angle}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
          "config": config},
         CHECKPOINT_PATH,
     )
-    print(f"saved {CHECKPOINT_PATH} (best val_acc={best_accuracy:.3f})")
+    print(f"saved {CHECKPOINT_PATH} (best val {args.select_by}={best_score:.3f})")
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ import numpy as np
 
 from data_pipeline import LABELS, load_frame_labels, parse_frame_id
 from evaluate import labeled_strokes, score
-from features import _IMAGE_EXTENSIONS, extract_raw_hand_coords, hand_state, video_fps
+from features import _IMAGE_EXTENSIONS, extract_raw_tracks, hand_state, video_fps
 
 DEFAULT_FPS = 30  # frame folders carry no frame rate; the thesis footage is 30fps
 
@@ -202,9 +202,12 @@ def frame_ids(source, num_frames):
     return [f"frame_{i:04d}.jpg" for i in range(num_frames)]
 
 
-def label_source(source, csv_left_slot):
-    """Video or frame folder -> [(frame_id, csv hand, label)] rows; csv_left_slot as in train.py."""
-    raw = extract_raw_hand_coords(source)
+def label_source(source, csv_left_slot, with_pose=False):
+    """
+    Video or frame folder -> [(frame_id, csv hand, label)] rows; csv_left_slot
+    as in train.py. with_pose measures the wrist angle against the forearm.
+    """
+    raw, elbows = extract_raw_tracks(source, with_pose=with_pose)
     fps = video_fps(source) or DEFAULT_FPS
     num_frames = len(raw["left"])
     ids = frame_ids(source, num_frames)
@@ -213,7 +216,7 @@ def label_source(source, csv_left_slot):
     for csv_hand, slot in slot_for.items():
         coords = raw[slot]
         detected = ~np.isnan(coords).any(axis=(1, 2))
-        per_hand[csv_hand] = label_hand(hand_state(coords), detected, fps)
+        per_hand[csv_hand] = label_hand(hand_state(coords, elbows[slot] if with_pose else None), detected, fps)
     rows = []
     for i in range(num_frames):
         for csv_hand in ("left", "right"):
@@ -272,13 +275,15 @@ def main():
     label.add_argument("--csv-left-slot", required=True, choices=["left", "right"],
                        help="which detected hand the CSV's 'left' means, as for train.py")
     label.add_argument("--out", required=True)
+    label.add_argument("--pose", action="store_true",
+                       help="measure the wrist angle against the forearm with the body model (elbows must be in frame)")
     check = commands.add_parser("check", help="compare a pre-labeled CSV with a hand-made one")
     check.add_argument("--auto", required=True)
     check.add_argument("--human", required=True)
     args = parser.parse_args()
 
     if args.command == "label":
-        rows = label_source(args.source, args.csv_left_slot)
+        rows = label_source(args.source, args.csv_left_slot, args.pose)
         with open(args.out, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["frame_id", "hand", "strike"])
