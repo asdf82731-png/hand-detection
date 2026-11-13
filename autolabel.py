@@ -19,6 +19,13 @@ label definitions in TRAINING_DESIGN.md section 6 (thesis 3.5.1, table 4.2):
   where it ends (TRAINING_DESIGN.md 5.2):
       high before, ends high -> full_stroke    high before, ends low -> down_stroke
       low before,  ends high -> up_stroke      low before,  ends low -> tab_stroke
+  These four clips each hold one stroke type, and the wrist alone did not
+  tell them apart (ROADMAP.md, 2026-11-13 stroke-type attempts): pass
+  --stroke-type to give every hit the type the person knows the clip has.
+  A full or tab clip then also fixes every hold (full holds high, tab holds
+  low, TRAINING_DESIGN.md 5.2): in a clip held at one height the
+  within-video split still cut the holds into two groups (ROADMAP.md,
+  2026-11-14). Down and up clips hold at both heights and keep the rule.
 - Movement that contains no hit (for example returning to the low position
   after an up stroke) is none.
 - Frames where the hand was not detected get no row, so they are left out of
@@ -54,17 +61,21 @@ from features import _IMAGE_EXTENSIONS, extract_raw_tracks, hand_state, video_fp
 
 DEFAULT_FPS = 30  # frame folders carry no frame rate; the thesis footage is 30fps
 
-# First guesses, in palm lengths and seconds. Tune them with `check`.
+# In palm lengths and seconds. HIT_SPEED to STOP_FRAMES were swept with `check`
+# against the Full and Tab hand labels (ROADMAP.md, 2026-11-13); the rest are first guesses.
 SMOOTH_FRAMES = 3          # moving-average width for the height and angle traces
 MOVE_SPEED = 1.5           # palm lengths / s: slower than this counts as still
-HIT_SPEED = 4.0            # palm lengths / s: a downswing must reach this speed...
-HIT_DROP = 0.4             # ...and fall at least this far, in palm lengths...
-STOP_SHARE = 0.25          # ...and slow from its top speed to this share of it...
-STOP_FRAMES = 3            # ...within this many frames (an abrupt stop, as at the drum)
+HIT_SPEED = 2.0            # palm lengths / s: a downswing must reach this speed...
+HIT_DROP = 0.2             # ...and fall at least this far, in palm lengths...
+STOP_SHARE = 0.5           # ...and slow from its top speed to this share of it...
+STOP_FRAMES = 5            # ...within this many frames (an abrupt stop, as at the drum)
 MERGE_GAP_FRAMES = 2       # still gaps this short do not end a movement
 SEPARATION = 1.0           # high and low still frames must be this far apart (standardized score)...
 MIN_GROUP_SHARE = 0.1      # ...and each be at least this share of still frames, to split within the video
 HIGH_HEIGHT = 1.0          # otherwise: high = wrist this many palm lengths above its lowest point
+
+# --stroke-type clips whose holds are all at one height (see the module docstring).
+FIXED_HOLD = {"full_stroke": "up_hold", "tab_stroke": "down_hold"}
 
 
 def _smooth(values, width=SMOOTH_FRAMES):
@@ -139,11 +150,13 @@ def _stroke_type(rises_high, ends_high):
             (False, True): "up_stroke", (False, False): "tab_stroke"}[(rises_high, ends_high)]
 
 
-def label_hand(states, detected, fps):
+def label_hand(states, detected, fps, stroke_type=None):
     """
     One hand's (N, 2) wrist states and (N,) detected mask -> list of N labels
     (None where the hand was never seen or for frames before it was first
-    seen). See the module docstring for the rules.
+    seen). See the module docstring for the rules. stroke_type, if given,
+    replaces the rule's stroke type for every hit, and for full and tab
+    also every hold (FIXED_HOLD).
     """
     n = len(states)
     labels = [None] * n
@@ -171,8 +184,9 @@ def label_hand(states, detected, fps):
         if height[top] - height[bottom] >= HIT_DROP and abrupt:
             hits.append(last)
 
+    fixed_hold = FIXED_HOLD.get(stroke_type)
     for i in range(n):
-        labels[i] = None if i < first_seen else ("up_hold" if is_high[i] else "down_hold")
+        labels[i] = None if i < first_seen else (fixed_hold or ("up_hold" if is_high[i] else "down_hold"))
     for first, last in _runs(moving):
         segment_hits = [h for h in hits if first <= h <= last]
         if not segment_hits:
@@ -188,7 +202,7 @@ def label_hand(states, detected, fps):
             start, end = bounds[k], bounds[k + 1]
             rises_high = bool(is_high[start:hit + 1].any())
             ends_high = bool(is_high[end]) if k + 1 < len(segment_hits) else bool(is_high[min(end + 1, n - 1)])
-            stroke = _stroke_type(rises_high, ends_high)
+            stroke = stroke_type or _stroke_type(rises_high, ends_high)
             for i in range(max(start, first_seen), end + 1):
                 labels[i] = stroke
     return labels
@@ -202,10 +216,11 @@ def frame_ids(source, num_frames):
     return [f"frame_{i:04d}.jpg" for i in range(num_frames)]
 
 
-def label_source(source, csv_left_slot, with_pose=False):
+def label_source(source, csv_left_slot, with_pose=False, stroke_type=None):
     """
     Video or frame folder -> [(frame_id, csv hand, label)] rows; csv_left_slot
     as in train.py. with_pose measures the wrist angle against the forearm.
+    stroke_type as in label_hand.
     """
     raw, elbows = extract_raw_tracks(source, with_pose=with_pose)
     fps = video_fps(source) or DEFAULT_FPS
@@ -216,7 +231,8 @@ def label_source(source, csv_left_slot, with_pose=False):
     for csv_hand, slot in slot_for.items():
         coords = raw[slot]
         detected = ~np.isnan(coords).any(axis=(1, 2))
-        per_hand[csv_hand] = label_hand(hand_state(coords, elbows[slot] if with_pose else None), detected, fps)
+        per_hand[csv_hand] = label_hand(hand_state(coords, elbows[slot] if with_pose else None), detected, fps,
+                                     stroke_type)
     rows = []
     for i in range(num_frames):
         for csv_hand in ("left", "right"):
@@ -277,13 +293,16 @@ def main():
     label.add_argument("--out", required=True)
     label.add_argument("--pose", action="store_true",
                        help="measure the wrist angle against the forearm with the body model (elbows must be in frame)")
+    label.add_argument("--stroke-type", choices=[l for l in LABELS if l.endswith("_stroke")],
+                       help="the one stroke type this clip has: every hit gets it instead of the rule's guess; "
+                            "full / tab also make every hold up_hold / down_hold")
     check = commands.add_parser("check", help="compare a pre-labeled CSV with a hand-made one")
     check.add_argument("--auto", required=True)
     check.add_argument("--human", required=True)
     args = parser.parse_args()
 
     if args.command == "label":
-        rows = label_source(args.source, args.csv_left_slot, args.pose)
+        rows = label_source(args.source, args.csv_left_slot, args.pose, args.stroke_type)
         with open(args.out, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["frame_id", "hand", "strike"])
