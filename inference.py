@@ -47,6 +47,9 @@ def load_checkpoint(path, device):
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
+    # Whether the hand-state wrist angle was measured against the forearm;
+    # inference must measure it the same way.
+    model.pose_angle = bool(config.get("pose_angle", False))
     return model, FeatureScaler.from_state_dict(checkpoint["scaler"]), checkpoint["hand_to_slot"]
 
 
@@ -181,7 +184,7 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         if total:
             report(DETECTION_SHARE * min(done / total, 1.0))
 
-    positions, states, detection_rate = extract_hand_tracks(source, on_frame)
+    positions, states, detection_rate = extract_hand_tracks(source, on_frame, getattr(model, "pose_angle", False))
     fps = video_fps(source)
     resampled = to_training_fps(positions, fps)
     frame_scale = 1.0

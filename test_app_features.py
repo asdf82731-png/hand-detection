@@ -242,5 +242,135 @@ class TestExpectedCountsInput(unittest.TestCase):
                 self.parse(text)
 
 
+
+def _hand_with_arm(forearm_angle, wrist_bend, frames=3):
+    """
+    Raw hand coords (N, 21, 3) and elbows (N, 2) for an arm pointing at
+    forearm_angle (radians from straight up) with the hand bent by wrist_bend
+    relative to the forearm. Palm length 50 px, forearm 200 px.
+    """
+    wrist = np.array([640.0, 400.0])
+    up = lambda a: np.array([np.sin(a), -np.cos(a)])  # image y grows downward
+    elbow = wrist - 200 * up(forearm_angle)
+    knuckle = wrist + 50 * up(forearm_angle + wrist_bend)
+    coords = np.zeros((frames, 21, 3), dtype=np.float32)
+    coords[:, 0, :2], coords[:, 9, :2] = wrist, knuckle
+    return coords, np.tile(elbow, (frames, 1)).astype(np.float32)
+
+
+class TestForearmWristAngle(unittest.TestCase):
+    # The thesis defines high and low by the wrist angle, i.e. hand against
+    # forearm. Without an elbow, the palm's direction is used instead, which
+    # also changes when the whole arm moves. With the elbow, it should not.
+
+    def test_straight_wrist_is_zero_and_a_bent_wrist_gives_the_bend(self):
+        coords, elbows = _hand_with_arm(0.3, 0.0)
+        np.testing.assert_allclose(hand_state(coords, elbows)[:, 1], 0.0, atol=1e-5)
+        coords, elbows = _hand_with_arm(0.3, 0.6)
+        np.testing.assert_allclose(np.abs(hand_state(coords, elbows)[:, 1]), 0.6, atol=1e-5)
+
+    def test_tilting_the_whole_arm_does_not_change_the_wrist_angle(self):
+        a = hand_state(*_hand_with_arm(0.0, 0.5))[:, 1]
+        b = hand_state(*_hand_with_arm(0.8, 0.5))[:, 1]
+        np.testing.assert_allclose(a, b, atol=1e-5)
+        # The palm-direction stand-in does change, which is why the elbow helps.
+        pa = hand_state(_hand_with_arm(0.0, 0.5)[0])[:, 1]
+        pb = hand_state(_hand_with_arm(0.8, 0.5)[0])[:, 1]
+        self.assertGreater(abs(pa[0] - pb[0]), 0.5)
+
+    def test_without_any_elbow_the_palm_direction_is_used(self):
+        coords, _ = _hand_with_arm(0.0, 0.5)
+        no_elbows = np.full((len(coords), 2), np.nan, dtype=np.float32)
+        np.testing.assert_allclose(hand_state(coords, no_elbows), hand_state(coords), atol=1e-6)
+
+
+class TestElbowMatching(unittest.TestCase):
+    def test_the_arm_whose_wrist_is_nearest_the_hand_is_taken(self):
+        from features import REFERENCE_HEIGHT, REFERENCE_WIDTH, match_elbow
+        coords, _ = _hand_with_arm(0.0, 0.0, frames=1)
+        hand = coords[0]
+        near_wrist = (hand[0, 0] / REFERENCE_WIDTH + 0.005, hand[0, 1] / REFERENCE_HEIGHT)
+        far_wrist = (0.1, 0.1)
+        elbow = match_elbow(hand, [((0.2, 0.2), far_wrist), ((0.5, 0.9), near_wrist)])
+        np.testing.assert_allclose(elbow, [0.5 * REFERENCE_WIDTH, 0.9 * REFERENCE_HEIGHT], atol=1e-3)
+
+    def test_an_arm_too_far_from_the_hand_is_not_used(self):
+        # The other person's arm, or the other arm, must not be paired.
+        from features import match_elbow
+        coords, _ = _hand_with_arm(0.0, 0.0, frames=1)
+        self.assertIsNone(match_elbow(coords[0], [((0.0, 0.0), (0.05, 0.05))]))
+
+
+class TestTrainingHelpers(unittest.TestCase):
+    def test_rare_classes_get_proportionally_larger_loss_weights(self):
+        # Holds and none outnumber strokes; unweighted, mostly predicting
+        # them scores well while missing strokes, which are what is counted.
+        from train import class_weights
+        w = class_weights([0] * 10 + [5] * 90, 7)
+        self.assertAlmostEqual(w[0].item() / w[5].item(), 9.0, places=5)
+        self.assertEqual(w[1].item(), 0.0)  # absent from training
+        self.assertAlmostEqual(w[0].item() * 10, w[5].item() * 90, places=4)  # equal total weight per class
+
+    def test_macro_f1_is_not_fooled_by_predicting_the_common_class(self):
+        from train import macro_f1
+        y_true = [5] * 90 + [0] * 10
+        always_hold = [5] * 100
+        self.assertLess(macro_f1(y_true, always_hold), 0.5)  # accuracy would be 0.90
+
+    def test_the_same_seed_gives_the_same_model(self):
+        from model import StrokeBiLSTMModel
+        from train import set_seed
+        set_seed(3)
+        a = StrokeBiLSTMModel(7).fc.weight.clone()
+        set_seed(3)
+        b = StrokeBiLSTMModel(7).fc.weight.clone()
+        torch.testing.assert_close(a, b)
+
+
+class TestServiceLimits(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import main
+        cls.main = main
+
+    def test_old_result_images_and_finished_jobs_are_cleaned_up(self):
+        # Without this, every upload left a PNG and a job behind forever.
+        import os
+        import time
+        main = self.main
+        now = time.time()
+        old_png = os.path.join(main.STATIC_DIR, "Left_test-old.png")
+        new_png = os.path.join(main.STATIC_DIR, "Left_test-new.png")
+        for path in (old_png, new_png):
+            open(path, "wb").close()
+        os.utime(old_png, (now - main.RETENTION_SECONDS - 10,) * 2)
+        with main._jobs_lock:
+            main._jobs["old"] = {"status": "done", "finished_at": now - main.RETENTION_SECONDS - 10}
+            main._jobs["running"] = {"status": "running", "progress": 0.5}
+        try:
+            main.cleanup_old_files(now)
+            self.assertFalse(os.path.exists(old_png))
+            self.assertTrue(os.path.exists(new_png))
+            self.assertNotIn("old", main._jobs)
+            self.assertIn("running", main._jobs)
+        finally:
+            for path in (old_png, new_png):
+                if os.path.exists(path):
+                    os.remove(path)
+            main._jobs.pop("running", None)
+
+    def test_a_video_over_the_length_limit_is_refused(self):
+        from fastapi import HTTPException
+        main = self.main
+        limit = main.MAX_VIDEO_SECONDS
+        main.MAX_VIDEO_SECONDS = 0.1  # the 5-frame 10fps fixture is 0.5 s
+        try:
+            with self.assertRaises(HTTPException) as caught:
+                main.check_video_length("test_data/rotation_tag_90.mp4")
+            self.assertEqual(caught.exception.status_code, 413)
+        finally:
+            main.MAX_VIDEO_SECONDS = limit
+
+
 if __name__ == "__main__":
     unittest.main()

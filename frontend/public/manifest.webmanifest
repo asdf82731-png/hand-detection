@@ -1,0 +1,17 @@
+{
+  "name": "鼓棒揮擊計數",
+  "short_name": "揮擊計數",
+  "description": "用手機錄下打鼓的手，計算全揮擊、向下、向上、點擊各打了幾下。",
+  "lang": "zh-TW",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f6f7f9",
+  "theme_color": "#2457c5",
+  "icons": [
+    {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "/icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

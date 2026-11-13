@@ -121,7 +121,41 @@ python evaluate.py --data-dir <沒用於訓練的影片資料夾> --checkpoint m
 uvicorn main:app --port 8000
 ```
 
-瀏覽器開啟 `http://localhost:8000`，上傳影片即可辨識。服務啟動時會讀取 `multi_motion_model_7class.pt`；還沒訓練就啟動會直接報錯。
+瀏覽器開啟 `http://localhost:8000`，就是手機 App（PWA）的畫面：錄影或選影片、選填練習目標、看結果與練習紀錄。服務啟動時會讀取 `multi_motion_model_7class.pt`；還沒訓練就啟動會直接報錯。
+
+### 用手機開啟、安裝到主畫面
+
+- 手機和電腦在同一個網路時，可以用 `uvicorn main:app --host 0.0.0.0 --port 8000` 啟動，再用手機開 `http://<電腦的 IP>:8000` 試用。
+- **要「安裝到主畫面」，網址必須是 HTTPS**（瀏覽器的規定；只有 `localhost` 例外）。正式給別人用時，要把服務放在有 HTTPS 的主機或反向代理後面。沒有 HTTPS 時，網頁仍然可以用，只是不能安裝、也不能離線開啟。
+- 安裝方式：Android Chrome 會出現「安裝到主畫面」按鈕；iPhone 用 Safari 開啟後，按分享 → 加入主畫面。
+
+**最快的做法：Cloudflare 臨時通道（免費、不用帳號）**，把電腦上的服務變成一個 HTTPS 網址：
+
+1. 安裝 cloudflared（Windows）：`winget install --id Cloudflare.cloudflared`
+2. 先啟動服務：`uvicorn main:app --port 8000`
+3. 另開一個視窗：`cloudflared tunnel --url http://localhost:8000`
+4. 畫面會印出 `https://<一串字>.trycloudflare.com`，用手機開這個網址，再照上面的方式安裝。
+
+限制：電腦和服務要一直開著，手機才能用；每次重開通道網址都會變，已安裝的 App 就要重新安裝；知道網址的人都能上傳影片。要長期使用，需要固定網址（Cloudflare 帳號加自己的網域建立具名通道，或部署到雲端主機）。
+
+### 修改 App 介面
+
+介面原始碼在 `frontend/`（React 19 + [Astryx](https://astryx.atmeta.com/docs/getting-started) 元件庫），建置好的檔案在 `webapp/`，伺服器直接提供 `webapp/`，所以只跑伺服器不需要 Node。修改 `frontend/src/` 之後要重新建置（需要 Node 22 以上）：
+
+```
+cd frontend
+npm install
+npm run build
+```
+
+### 服務的設定（環境變數，都可不設）
+
+| 變數 | 預設 | 用途 |
+|---|---|---|
+| `MAX_UPLOAD_MB` | 200 | 上傳影片大小上限 |
+| `MAX_VIDEO_SECONDS` | 600 | 影片長度上限（秒） |
+| `RETENTION_SECONDS` | 3600 | 結果圖片與完成的分析保留多久 |
+| `ALLOWED_ORIGINS` | 空 | 允許從其他網站呼叫 API 的來源，以逗號分隔；空的表示只有本服務自己的頁面能用 |
 
 ## 7. 把模型帶回 GitHub（選用）
 

@@ -1,5 +1,7 @@
 import json
+import time
 
+import cv2
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,8 +16,18 @@ from pipeline import LABELS
 # === Configuration ===
 MODEL_PATH = os.getenv("MODEL_PATH", "multi_motion_model_7class.pt")
 STATIC_DIR = os.getenv("STATIC_DIR", "./static")
-CM_BASE_URL = os.getenv("CM_BASE_URL", "http://localhost:8000/static")
+# Relative by default, so the images load whatever host and port the page is served from.
+CM_BASE_URL = os.getenv("CM_BASE_URL", "/static")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Limits, so one upload cannot fill the disk or tie the server up for hours.
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "200"))
+MAX_VIDEO_SECONDS = float(os.getenv("MAX_VIDEO_SECONDS", "600"))
+# Confusion-matrix images and finished jobs older than this are deleted.
+RETENTION_SECONDS = float(os.getenv("RETENTION_SECONDS", "3600"))
+# Comma-separated origins allowed to call the API from another site. Empty
+# (the default) allows only the page this server serves itself.
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 
 os.makedirs(STATIC_DIR, exist_ok=True)
 
@@ -27,22 +39,24 @@ print("[INFO] Model weights loaded successfully.")
 # === FastAPI Setup ===
 app = FastAPI(title="Hand Strike Recognition API")
 
-from fastapi.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if ALLOWED_ORIGINS:
+    from fastapi.middleware.cors import CORSMiddleware
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=ALLOWED_ORIGINS,
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
 
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
-async def serve_index():
-    return FileResponse("index.html")
+# === Phone app (PWA) ===
+# The app is built from frontend/ (React + Astryx) into webapp/ with
+# `npm run build`; the built files are committed so the server runs without
+# Node. It is mounted at the end of this file, after the API routes.
+WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 
 class RecognitionResponse(BaseModel):
     status: str
@@ -61,18 +75,63 @@ class RecognitionResponse(BaseModel):
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".avi")
 
 
+UPLOAD_CHUNK = 1024 * 1024
+
+
+def check_video_length(path):
+    """Raise HTTPException(413) for a video longer than MAX_VIDEO_SECONDS, (422) for one that cannot be read."""
+    cap = cv2.VideoCapture(path)
+    fps, frames = cap.get(cv2.CAP_PROP_FPS), cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    cap.release()
+    if fps <= 0 or frames <= 0:
+        raise HTTPException(422, "Cannot read this video")
+    if frames / fps > MAX_VIDEO_SECONDS:
+        raise HTTPException(413, f"Video is {frames / fps:.0f} s long; the limit is {MAX_VIDEO_SECONDS:.0f} s")
+
+
 async def _save_upload(video_file):
-    """Validate the extension and write the upload to temp/. Returns (vid_id, temp_path)."""
-    ext = os.path.splitext(video_file.filename)[1].lower()
+    """
+    Validate the extension, write the upload to temp/ in chunks (refusing it
+    once it passes MAX_UPLOAD_MB) and check its length. Returns (vid_id, temp_path).
+    """
+    ext = os.path.splitext(video_file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(400, "Invalid video format")
     print(f"[DEBUG] Uploaded video name: {video_file.filename}")
     vid_id = str(uuid.uuid4())
     temp_path = f"temp/{vid_id}{ext}"
     os.makedirs(os.path.dirname(temp_path), exist_ok=True)
-    with open(temp_path, "wb") as f:
-        f.write(await video_file.read())
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    written = 0
+    try:
+        with open(temp_path, "wb") as f:
+            while chunk := await video_file.read(UPLOAD_CHUNK):
+                written += len(chunk)
+                if written > limit:
+                    raise HTTPException(413, f"Video is larger than {MAX_UPLOAD_MB:.0f} MB")
+                f.write(chunk)
+        check_video_length(temp_path)
+    except HTTPException:
+        _remove(temp_path)
+        raise
+    cleanup_old_files()
     return vid_id, temp_path
+
+
+def cleanup_old_files(now=None):
+    """Delete confusion-matrix images and finished jobs older than RETENTION_SECONDS."""
+    now = time.time() if now is None else now
+    for name in os.listdir(STATIC_DIR):
+        path = os.path.join(STATIC_DIR, name)
+        try:
+            if name.endswith(".png") and now - os.path.getmtime(path) > RETENTION_SECONDS:
+                os.remove(path)
+        except OSError:
+            pass
+    with _jobs_lock:
+        for job_id in [j for j, job in _jobs.items()
+                       if job["status"] != "running" and now - job.get("finished_at", now) > RETENTION_SECONDS]:
+            del _jobs[job_id]
 
 
 def parse_expected_counts(text):
@@ -140,9 +199,9 @@ async def recognize(video_file: UploadFile = File(...), expected_counts: str = F
 
 
 # === Background jobs, so the page can show real progress ===
-# In-memory: jobs are lost on restart, and finished jobs stay until the
-# process exits. Enough for a single server; a production deployment needs a
-# shared store and cleanup.
+# In-memory: jobs are lost on restart, and finished jobs are dropped after
+# RETENTION_SECONDS. Enough for a single server; several server processes
+# would need a shared store.
 _jobs = {}
 _jobs_lock = threading.Lock()
 
@@ -155,11 +214,11 @@ def _update_job(job_id, **fields):
 def _run_job(job_id, temp_path, vid_id, expected):
     try:
         result = _analyze(temp_path, vid_id, expected, lambda fraction: _update_job(job_id, progress=round(fraction, 3)))
-        _update_job(job_id, status="done", progress=1.0, result=result)
+        _update_job(job_id, status="done", progress=1.0, result=result, finished_at=time.time())
     except ValueError as e:
-        _update_job(job_id, status="error", detail=str(e))
+        _update_job(job_id, status="error", detail=str(e), finished_at=time.time())
     except Exception as e:
-        _update_job(job_id, status="error", detail=f"Processing error: {str(e)}")
+        _update_job(job_id, status="error", detail=f"Processing error: {str(e)}", finished_at=time.time())
     finally:
         _remove(temp_path)
 
@@ -182,4 +241,22 @@ async def get_job(job_id: str):
         job = _jobs.get(job_id)
         if job is None:
             raise HTTPException(404, "Unknown job")
-        return dict(job)
+        return {k: v for k, v in job.items() if k != "finished_at"}
+
+
+class _AppFiles(StaticFiles):
+    """Serves the built app; index.html and the service worker are always revalidated so updates reach phones."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path in ("", ".", "index.html", "sw.js", "manifest.webmanifest"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+if os.path.isdir(WEBAPP_DIR):
+    app.mount("/", _AppFiles(directory=WEBAPP_DIR, html=True), name="app")
+else:
+    @app.get("/")
+    async def app_not_built():
+        raise HTTPException(503, "The app is not built: run `npm install && npm run build` in frontend/")

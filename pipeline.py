@@ -65,6 +65,59 @@ class _Hands:
 mp_hands = _Hands(tracking=False)
 
 
+POSE_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pose_landmarker_lite.task")
+# MediaPipe Pose landmark indices: (elbow, wrist) for the person's left and right arm.
+POSE_ARMS = ((13, 15), (14, 16))
+POSE_MIN_VISIBILITY = 0.5
+
+
+class _Pose:
+    """
+    MediaPipe PoseLandmarker in tracking mode, used only for the elbows: the
+    hand model has no forearm point, so the real wrist angle (forearm vs hand)
+    needs the body model. One per video, frames in order.
+    """
+
+    def __init__(self):
+        self._timestamp_ms = 0
+        self._landmarker = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=POSE_MODEL_PATH),
+            running_mode=vision.RunningMode.VIDEO,
+        ))
+
+    def arms(self, image_rgb):
+        """
+        Returns [(elbow (x, y), wrist (x, y))] in normalized image coordinates
+        for each arm whose elbow and wrist are both clearly visible.
+        """
+        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(image_rgb))
+        result = self._landmarker.detect_for_video(image, self._timestamp_ms)
+        self._timestamp_ms += _FRAME_PERIOD_MS
+        if not result.pose_landmarks:
+            return []
+        landmarks = result.pose_landmarks[0]
+        arms = []
+        for elbow, wrist in POSE_ARMS:
+            e, w = landmarks[elbow], landmarks[wrist]
+            if min(e.visibility, w.visibility) >= POSE_MIN_VISIBILITY:
+                arms.append(((e.x, e.y), (w.x, w.y)))
+        return arms
+
+    def close(self):
+        self._landmarker.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def create_pose_tracker():
+    """Tracking-mode body pose for the elbows; one per video, like create_hand_tracker()."""
+    return _Pose()
+
+
 def create_hand_tracker():
     """
     Tracking-mode MediaPipe Hands. It carries state from frame to frame, so

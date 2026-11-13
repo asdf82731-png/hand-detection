@@ -3,3 +3,4 @@ __pycache__/
 static/
 temp/
 data/
+frontend/node_modules/
