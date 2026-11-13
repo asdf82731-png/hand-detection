@@ -28,6 +28,9 @@ class TestNormalizeLabel(unittest.TestCase):
         self.assertEqual(normalize_label("down_strike"), "down_stroke")
         self.assertEqual(normalize_label("up_strike"), "up_stroke")
         self.assertEqual(normalize_label("tab_strike"), "tab_stroke")
+        # The real Tab.csv writes the bare word "tab" (911 rows); rejecting it
+        # would drop the whole Tab action from training.
+        self.assertEqual(normalize_label("tab"), "tab_stroke")
 
     def test_hold_and_none_pass_through_unchanged(self):
         self.assertEqual(normalize_label("down_hold"), "down_hold")
@@ -196,6 +199,18 @@ class TestTrainValNoLeakage(unittest.TestCase):
             e = s + 30
             # None of the surviving windows may overlap [split_point-30, split_point+30)
             self.assertFalse(e > split_point - 30 and s < split_point + 30)
+
+    def test_split_covers_the_labeled_range_not_the_whole_frame_folder(self):
+        # The real frame folders hold ~5000 images but the CSV labels only
+        # frames ~26-1500. Splitting at 80% of the folder put every labeled
+        # window in train and left validation empty, so training could not run.
+        frame_labels = {i: {"left": "full_stroke"} for i in range(26, 1500)}
+        windows = build_labeled_windows(frame_labels, "left", num_frames=5000, window_size=30, step=1)
+        train, val = split_train_val(windows, num_frames=1500, window_size=30, first_frame=26)
+
+        self.assertTrue(val)
+        self.assertGreater(len(train), 3 * len(val))
+        self.assertLess(max(s for s, _ in train) + 30, min(s for s, _ in val))
 
 
 if __name__ == "__main__":
