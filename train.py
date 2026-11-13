@@ -73,7 +73,10 @@ def load_split_windows(data_dir, csv_hand_to_slot):
 
         for csv_hand, slot in csv_hand_to_slot.items():
             windows = build_labeled_windows(frame_labels, csv_hand, num_frames, WINDOW_SIZE, TRAIN_STEP)
-            for split_windows, target in zip(split_train_val(windows, num_frames, WINDOW_SIZE), (train, val)):
+            # Split over the labeled frames only: the real frame folders are
+            # 2-4x longer than the range the CSV labels.
+            split = split_train_val(windows, max(frame_labels) + 1, WINDOW_SIZE, first_frame=min(frame_labels))
+            for split_windows, target in zip(split, (train, val)):
                 for window, _, label in windows_to_samples(positions[slot], slot, split_windows, WINDOW_SIZE):
                     target.append((*window_features(window), slot, label))
         print(
