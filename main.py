@@ -49,13 +49,14 @@ if ALLOWED_ORIGINS:
     )
 
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
-async def serve_index():
-    return FileResponse("index.html")
+# === Phone app (PWA) ===
+# The app is built from frontend/ (React + Astryx) into webapp/ with
+# `npm run build`; the built files are committed so the server runs without
+# Node. It is mounted at the end of this file, after the API routes.
+WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
 
 class RecognitionResponse(BaseModel):
     status: str
@@ -241,3 +242,21 @@ async def get_job(job_id: str):
         if job is None:
             raise HTTPException(404, "Unknown job")
         return {k: v for k, v in job.items() if k != "finished_at"}
+
+
+class _AppFiles(StaticFiles):
+    """Serves the built app; index.html and the service worker are always revalidated so updates reach phones."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path in ("", ".", "index.html", "sw.js", "manifest.webmanifest"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+if os.path.isdir(WEBAPP_DIR):
+    app.mount("/", _AppFiles(directory=WEBAPP_DIR, html=True), name="app")
+else:
+    @app.get("/")
+    async def app_not_built():
+        raise HTTPException(503, "The app is not built: run `npm install && npm run build` in frontend/")
