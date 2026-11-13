@@ -346,10 +346,62 @@ def evaluate_metrics(left_predictions, right_predictions, cm_base_url, vid_id, s
     )
 
 
-def evaluate_event_metrics(left_events, right_events, cm_base_url, vid_id, static_dir):
-    """Response fields from each hand's detected stroke events (lists of indices into LABELS)."""
+# Thesis 4.6.6: below this accuracy a stroke type gets an improvement
+# suggestion, at or above it a positive one.
+SUGGESTION_THRESHOLD = 90
+
+
+def expected_count_accuracy(counts, expected):
+    """
+    Thesis 4.6.5: accuracy = correctly recognized strokes / actual strokes,
+    per stroke type. The actual count comes from the user (how many of each
+    stroke they set out to play); without it there is no actual count and
+    this accuracy cannot be computed. Detected strokes beyond the actual
+    count are not counted as correct, so correct = min(detected, actual).
+    This checks the counts only, not which detected stroke matches which
+    played one. Types the user gave no count (or 0) for get None.
+    """
+    accuracy = {}
+    for label in LABELS:
+        actual = (expected or {}).get(label)
+        accuracy[label] = round(min(counts[label], actual) / actual * 100, 2) if actual else None
+    return accuracy
+
+
+def build_suggestions(hand_results, threshold=SUGGESTION_THRESHOLD):
+    """
+    hand_results: [(hand name, counts, accuracy per stroke type, whether the
+    accuracy comes from user-supplied expected counts)]. A type with
+    no accuracy (None), or with no detected strokes when the accuracy is the
+    self-consistency score, gets no suggestion: there is nothing to judge.
+    """
+    suggestions = []
+    for hand_name, counts, accuracy_per_class, from_expected in hand_results:
+        for label, accuracy in accuracy_per_class.items():
+            if accuracy is None or (not from_expected and counts[label] == 0):
+                continue
+            if accuracy < threshold:
+                suggestions.append(f"Try making the {hand_name} hand's '{label}' gesture more distinct — it reached {accuracy:.0f}%, below {threshold}%.")
+            else:
+                suggestions.append(f"The {hand_name} hand's '{label}' strokes were stable ({accuracy:.0f}%) — keep it up.")
+    return suggestions
+
+
+def evaluate_event_metrics(left_events, right_events, cm_base_url, vid_id, static_dir, expected=None):
+    """
+    Response fields from each hand's detected stroke events (lists of indices
+    into LABELS). expected: optional {"left": {"Full": n, ...}, "right": {...}},
+    the number of each stroke the user set out to play. With it, accuracy is
+    the thesis definition (expected_count_accuracy); without it, the
+    self-consistency score, which is not measured against anything real.
+    """
     left_cm, left_counts, left_accuracy = _evaluate_hand_events(left_events)
     right_cm, right_counts, right_accuracy = _evaluate_hand_events(right_events)
+    from_expected = {hand: bool(expected and expected.get(hand)) for hand in ("left", "right")}
+    if from_expected["left"]:
+        left_accuracy = expected_count_accuracy(left_counts, expected["left"])
+    if from_expected["right"]:
+        right_accuracy = expected_count_accuracy(right_counts, expected["right"])
 
     # Save confusion matrix as image
     def save_cm(cm, hand):
@@ -366,12 +418,10 @@ def evaluate_event_metrics(left_events, right_events, cm_base_url, vid_id, stati
     left_cm_url = save_cm(left_cm, "Left")
     right_cm_url = save_cm(right_cm, "Right")
 
-    # Suggestions for improvement
-    suggestions = []
-    for hand_name, accuracy_per_class in [("left", left_accuracy), ("right", right_accuracy)]:
-        for label, accuracy in accuracy_per_class.items():
-            if accuracy < 70:
-                suggestions.append(f"Try making the {hand_name} hand's '{label}' gesture more distinct — it wasn't reliably recognized.")
+    suggestions = build_suggestions([
+        ("left", left_counts, left_accuracy, from_expected["left"]),
+        ("right", right_counts, right_accuracy, from_expected["right"]),
+    ])
 
     return {
         "left_hand_counts": left_counts,
@@ -380,5 +430,6 @@ def evaluate_event_metrics(left_events, right_events, cm_base_url, vid_id, stati
         "right_hand_accuracy": right_accuracy,
         "left_confusion_matrix_url": left_cm_url,
         "right_confusion_matrix_url": right_cm_url,
-        "suggestions": suggestions
+        "suggestions": suggestions,
+        "accuracy_basis": {hand: "expected_counts" if used else "self_consistency" for hand, used in from_expected.items()},
     }

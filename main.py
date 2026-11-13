@@ -1,4 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import json
+
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import os
@@ -6,7 +8,8 @@ import threading
 import uuid
 import torch
 from pipeline import evaluate_event_metrics
-from inference import load_checkpoint, recognize as recognize_strokes
+from inference import analyze, load_checkpoint
+from pipeline import LABELS
 
 # === Configuration ===
 MODEL_PATH = os.getenv("MODEL_PATH", "multi_motion_model_7class.pt")
@@ -50,6 +53,9 @@ class RecognitionResponse(BaseModel):
     left_confusion_matrix_url: str
     right_confusion_matrix_url: str
     suggestions: list
+    accuracy_basis: dict = {}
+    stroke_metrics: dict = {}
+    detection_rate: dict = {}
 
     
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".avi")
@@ -69,12 +75,40 @@ async def _save_upload(video_file):
     return vid_id, temp_path
 
 
-def _analyze(temp_path, vid_id, on_progress=None):
+def parse_expected_counts(text):
+    """
+    Optional form field: how many of each stroke the user set out to play, as
+    JSON {"left": {"Full": 10, ...}, "right": {...}}. Empty means not given.
+    Raises HTTPException(400) for anything else.
+    """
+    if not text or not text.strip():
+        return None
+    try:
+        data = json.loads(text)
+        expected = {}
+        for hand, counts in data.items():
+            if hand not in ("left", "right") or not isinstance(counts, dict):
+                raise ValueError(hand)
+            for label, count in counts.items():
+                if label not in LABELS or not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                    raise ValueError(label)
+            positive = {label: count for label, count in counts.items() if count > 0}
+            if positive:
+                expected[hand] = positive
+        return expected or None
+    except (ValueError, AttributeError):
+        raise HTTPException(400, 'expected_counts must be JSON like {"left": {"Full": 10}, "right": {"Down": 5}} '
+                                 f"with stroke names from {LABELS} and whole numbers of 0 or more")
+
+
+def _analyze(temp_path, vid_id, expected=None, on_progress=None):
     """Video on disk -> the response fields. Raises ValueError for a video that cannot be analyzed."""
-    events = recognize_strokes(temp_path, model, scaler, hand_to_slot, DEVICE, on_progress)
+    analysis = analyze(temp_path, model, scaler, hand_to_slot, DEVICE, on_progress)
+    events = analysis["events"]
     print(f"[DEBUG] Stroke events - left: {len(events['left'])}, right: {len(events['right'])}")
-    results = evaluate_event_metrics(events["left"], events["right"], CM_BASE_URL, vid_id, STATIC_DIR)
-    return {"status": "success", **results}
+    results = evaluate_event_metrics(events["left"], events["right"], CM_BASE_URL, vid_id, STATIC_DIR, expected)
+    return {"status": "success", **results, "stroke_metrics": analysis["metrics"],
+            "detection_rate": analysis["detection_rate"]}
 
 
 def _remove(temp_path):
@@ -87,13 +121,14 @@ def _remove(temp_path):
 
 
 @app.post("/recognize", response_model=RecognitionResponse)
-async def recognize(video_file: UploadFile = File(...)):
+async def recognize(video_file: UploadFile = File(...), expected_counts: str = Form("")):
     """Analyze an upload and return the result when done (no progress reporting; see /jobs)."""
     temp_path = ""
     try:
+        expected = parse_expected_counts(expected_counts)
         vid_id, temp_path = await _save_upload(video_file)
         try:
-            return JSONResponse(content=_analyze(temp_path, vid_id))
+            return JSONResponse(content=_analyze(temp_path, vid_id, expected))
         except ValueError as e:
             raise HTTPException(422, str(e))
     except HTTPException:
@@ -117,9 +152,9 @@ def _update_job(job_id, **fields):
         _jobs[job_id].update(fields)
 
 
-def _run_job(job_id, temp_path, vid_id):
+def _run_job(job_id, temp_path, vid_id, expected):
     try:
-        result = _analyze(temp_path, vid_id, lambda fraction: _update_job(job_id, progress=round(fraction, 3)))
+        result = _analyze(temp_path, vid_id, expected, lambda fraction: _update_job(job_id, progress=round(fraction, 3)))
         _update_job(job_id, status="done", progress=1.0, result=result)
     except ValueError as e:
         _update_job(job_id, status="error", detail=str(e))
@@ -130,12 +165,13 @@ def _run_job(job_id, temp_path, vid_id):
 
 
 @app.post("/jobs")
-async def create_job(video_file: UploadFile = File(...)):
+async def create_job(video_file: UploadFile = File(...), expected_counts: str = Form("")):
     """Start analyzing an upload in the background. Returns {"job_id"}; poll GET /jobs/{job_id}."""
+    expected = parse_expected_counts(expected_counts)
     vid_id, temp_path = await _save_upload(video_file)
     with _jobs_lock:
         _jobs[vid_id] = {"status": "running", "progress": 0.0}
-    threading.Thread(target=_run_job, args=(vid_id, temp_path, vid_id), daemon=True).start()
+    threading.Thread(target=_run_job, args=(vid_id, temp_path, vid_id, expected), daemon=True).start()
     return {"job_id": vid_id}
 
 
