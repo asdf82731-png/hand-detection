@@ -55,6 +55,11 @@
       background-color: #0056b3;
     }
 
+    .expected { margin: 10px 0; text-align: left; }
+    .expected table { border-collapse: collapse; margin-top: 8px; }
+    .expected th, .expected td { padding: 4px 6px; }
+    .expected input { width: 4.5em; }
+
     .loading-bar {
       width: 100%;
       height: 12px;
@@ -137,10 +142,24 @@
 
     <div class="upload-area">
       <p><strong>Upload a hand-strike video file (mp4/mov/avi):</strong></p>
-      <input type="file" id="fileInput" accept=".mp4,.mov,.avi"/>
+      <input type="file" id="fileInput" accept=".mp4,.mov,.avi" onchange="previewVideo()"/>
       <br />
+      <details class="expected">
+        <summary>Optional: how many of each stroke did you play? (gives a real accuracy)</summary>
+        <table id="expectedTable">
+          <tr><th></th><th>Full</th><th>Down</th><th>Up</th><th>Tab</th></tr>
+          <tr><th>Left</th>
+            <td><input type="number" min="0" step="1" id="exp-left-Full"></td><td><input type="number" min="0" step="1" id="exp-left-Down"></td>
+            <td><input type="number" min="0" step="1" id="exp-left-Up"></td><td><input type="number" min="0" step="1" id="exp-left-Tab"></td></tr>
+          <tr><th>Right</th>
+            <td><input type="number" min="0" step="1" id="exp-right-Full"></td><td><input type="number" min="0" step="1" id="exp-right-Down"></td>
+            <td><input type="number" min="0" step="1" id="exp-right-Up"></td><td><input type="number" min="0" step="1" id="exp-right-Tab"></td></tr>
+        </table>
+      </details>
       <button onclick="uploadVideo()">Upload & Predict</button>
       <div class="loading-bar"><div id="progressBar"></div></div>
+      <p id="progressText" class="note"></p>
+      <video id="preview" controls hidden style="max-width: 100%; margin-top: 10px; border-radius: 6px;"></video>
     </div>
 
     <div class="grid">
@@ -153,11 +172,11 @@
         <pre id="rightActions">Waiting...</pre>
       </div>
       <div class="card">
-        <h3>Left Hand Consistency</h3>
+        <h3 id="leftAccuracyTitle">Left Hand Consistency</h3>
         <pre id="leftAccuracy">Waiting...</pre>
       </div>
       <div class="card">
-        <h3>Right Hand Consistency</h3>
+        <h3 id="rightAccuracyTitle">Right Hand Consistency</h3>
         <pre id="rightAccuracy">Waiting...</pre>
       </div>
       <div class="card">
@@ -170,7 +189,19 @@
       </div>
     </div>
 
-    <p class="note">"Consistency" shows how often the detected strokes for that hand agreed with each other in this video — it is not measured against a human-verified ground truth.</p>
+    <div class="grid" style="margin-top: 20px;">
+      <div class="card">
+        <h3>Left Hand Movement</h3>
+        <pre id="leftMetrics">Waiting...</pre>
+      </div>
+      <div class="card">
+        <h3>Right Hand Movement</h3>
+        <pre id="rightMetrics">Waiting...</pre>
+      </div>
+    </div>
+    <p class="note">Movement: peak wrist height and downward speed are in palm lengths (and palm lengths per second), angle range in degrees. CV is the spread between strokes of the same type: lower is more consistent. Downward speed stands in for force, which a camera cannot measure.</p>
+
+    <p class="note">"Consistency" shows how often the detected strokes for that hand agreed with each other in this video — it is not measured against a human-verified ground truth. Enter how many of each stroke you played above to get an accuracy instead.</p>
 
     <div class="suggestions">
       <h3>Suggestions</h3>
@@ -179,6 +210,80 @@
   </div>
 
   <script>
+    let previewUrl = null;
+
+    // Plays the chosen file in the page; nothing is uploaded for this.
+    function previewVideo() {
+      const file = document.getElementById("fileInput").files[0];
+      const video = document.getElementById("preview");
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = file ? URL.createObjectURL(file) : null;
+      video.hidden = !file;
+      if (file) video.src = previewUrl;
+    }
+
+    function setProgress(fraction, text) {
+      document.getElementById("progressBar").style.width = Math.round(fraction * 100) + "%";
+      document.getElementById("progressText").textContent = text;
+    }
+
+    const STROKES = ["Full", "Down", "Up", "Tab"];
+
+    // {"left": {"Full": 10}, ...} from the optional inputs; empty string if none filled in.
+    function expectedCounts() {
+      const expected = {};
+      for (const hand of ["left", "right"]) {
+        for (const stroke of STROKES) {
+          const value = document.getElementById(`exp-${hand}-${stroke}`).value.trim();
+          if (value === "") continue;
+          const count = Number(value);
+          if (!Number.isInteger(count) || count < 0) throw new Error(`${hand} ${stroke}: enter a whole number of 0 or more`);
+          (expected[hand] = expected[hand] || {})[stroke] = count;
+        }
+      }
+      return Object.keys(expected).length ? JSON.stringify(expected) : "";
+    }
+
+    function formatMetrics(metrics, rate) {
+      if (!metrics) return "-";
+      const fmt = (mean, cv) => mean === null ? "-" : `${mean}` + (cv === null ? "" : ` (CV ${cv})`);
+      const lines = [`Hand detected in ${Math.round(rate * 100)}% of frames`];
+      for (const stroke of STROKES) {
+        const s = metrics.strokes[stroke];
+        if (!s || !s.count) continue;
+        lines.push(`${stroke} x${s.count}: height ${fmt(s.peak_height_mean, s.peak_height_cv)}, angle ${fmt(s.angle_range_deg_mean, s.angle_range_deg_cv)}°, down speed ${fmt(s.peak_down_speed_mean, s.peak_down_speed_cv)}`);
+      }
+      if (lines.length === 1) lines.push("No strokes detected");
+      lines.push(`Time between strokes: ${fmt(metrics.interval_s_mean, metrics.interval_s_cv)} s`);
+      return lines.join("\n");
+    }
+
+    function showResults(data) {
+      document.getElementById("leftActions").textContent = JSON.stringify(data.left_hand_counts, null, 2);
+      document.getElementById("rightActions").textContent = JSON.stringify(data.right_hand_counts, null, 2);
+      document.getElementById("leftAccuracy").textContent = JSON.stringify(data.left_hand_accuracy, null, 2);
+      document.getElementById("rightAccuracy").textContent = JSON.stringify(data.right_hand_accuracy, null, 2);
+      for (const hand of ["left", "right"]) {
+        const fromCounts = data.accuracy_basis && data.accuracy_basis[hand] === "expected_counts";
+        const name = hand === "left" ? "Left" : "Right";
+        document.getElementById(hand + "AccuracyTitle").textContent = `${name} Hand ${fromCounts ? "Accuracy (vs. your counts)" : "Consistency"}`;
+        document.getElementById(hand + "Metrics").textContent =
+          formatMetrics(data.stroke_metrics && data.stroke_metrics[hand], data.detection_rate ? data.detection_rate[hand] : 0);
+      }
+      document.getElementById("leftCM").src = data.left_confusion_matrix_url;
+      document.getElementById("rightCM").src = data.right_confusion_matrix_url;
+
+      const suggestionList = document.getElementById("suggestionsList");
+      suggestionList.innerHTML = "";
+      data.suggestions.forEach(text => {
+        const li = document.createElement("li");
+        li.textContent = text;
+        suggestionList.appendChild(li);
+      });
+    }
+
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
     async function uploadVideo() {
       const input = document.getElementById("fileInput");
       const file = input.files[0];
@@ -186,44 +291,41 @@
 
       const formData = new FormData();
       formData.append("video_file", file);
-      document.getElementById("progressBar").style.width = "30%";
+      try {
+        formData.append("expected_counts", expectedCounts());
+      } catch (err) {
+        return alert(err.message);
+      }
+      setProgress(0, "Uploading...");
 
       try {
-        const response = await fetch("/recognize", {
-          method: "POST",
-          body: formData,
-        });
-
-        document.getElementById("progressBar").style.width = "70%";
-
-        if (!response.ok) {
-          const err = await response.json();
-          alert("Error: " + err.detail);
-          document.getElementById("progressBar").style.width = "0%";
-          return;
+        const start = await fetch("/jobs", { method: "POST", body: formData });
+        if (!start.ok) {
+          const err = await start.json();
+          setProgress(0, "");
+          return alert("Error: " + err.detail);
         }
+        const { job_id } = await start.json();
 
-        const data = await response.json();
-        document.getElementById("progressBar").style.width = "100%";
-
-        document.getElementById("leftActions").textContent = JSON.stringify(data.left_hand_counts, null, 2);
-        document.getElementById("rightActions").textContent = JSON.stringify(data.right_hand_counts, null, 2);
-        document.getElementById("leftAccuracy").textContent = JSON.stringify(data.left_hand_accuracy, null, 2);
-        document.getElementById("rightAccuracy").textContent = JSON.stringify(data.right_hand_accuracy, null, 2);
-        document.getElementById("leftCM").src = data.left_confusion_matrix_url;
-        document.getElementById("rightCM").src = data.right_confusion_matrix_url;
-
-        const suggestionList = document.getElementById("suggestionsList");
-        suggestionList.innerHTML = "";
-        data.suggestions.forEach(text => {
-          const li = document.createElement("li");
-          li.textContent = text;
-          suggestionList.appendChild(li);
-        });
-
+        while (true) {
+          await sleep(500);
+          const response = await fetch("/jobs/" + job_id);
+          if (!response.ok) throw new Error("Lost track of the analysis (HTTP " + response.status + ")");
+          const job = await response.json();
+          if (job.status === "done") {
+            setProgress(1, "Done");
+            showResults(job.result);
+            return;
+          }
+          if (job.status === "error") {
+            setProgress(0, "");
+            return alert("Error: " + job.detail);
+          }
+          setProgress(job.progress, "Analyzing... " + Math.round(job.progress * 100) + "%");
+        }
       } catch (err) {
+        setProgress(0, "");
         alert("Upload failed: " + err.message);
-        document.getElementById("progressBar").style.width = "0%";
       }
     }
   </script>

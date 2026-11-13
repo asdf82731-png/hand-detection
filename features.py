@@ -90,17 +90,57 @@ def iter_frames(source):
         yield from enumerate(read_upright_frames(source))
 
 
-def extract_raw_hand_coords(source):
+def source_frame_count(source):
+    """Number of frames a video file or frame-image directory holds (the video's own count may be approximate)."""
+    if os.path.isdir(source):
+        return sum(1 for n in os.listdir(source) if n.lower().endswith(_IMAGE_EXTENSIONS))
+    cap = cv2.VideoCapture(source)
+    count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return max(count, 0)
+
+
+def video_fps(source):
+    """Frame rate of a video file; None for a frame-image directory or when the file does not say."""
+    if os.path.isdir(source):
+        return None
+    cap = cv2.VideoCapture(source)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return fps if fps > 0 else None
+
+
+def resample_to_fps(positions, fps, target_fps):
+    """
+    (N, 21, 3) positions sampled at fps -> the same motion sampled at
+    target_fps, by linear interpolation in time. Velocity and acceleration are
+    frame-to-frame differences, so without this a 60fps video gives half the
+    velocity of the same stroke filmed at the 30fps the model was trained on.
+    """
+    positions = np.asarray(positions, dtype=np.float32)
+    if len(positions) < 2:
+        return positions
+    duration = (len(positions) - 1) / fps
+    target_times = np.arange(0.0, duration + 1e-9, 1.0 / target_fps)
+    source_times = np.arange(len(positions)) / fps
+    flat = positions.reshape(len(positions), -1)
+    out = np.stack([np.interp(target_times, source_times, flat[:, k]) for k in range(flat.shape[1])], axis=1)
+    return out.reshape((len(target_times),) + positions.shape[1:]).astype(np.float32)
+
+
+def extract_raw_hand_coords(source, on_frame=None):
     """
     Video file or frame-image directory -> {"left": (N, 21, 3), "right": ...}
     in reference-frame pixels, NaN where the hand was not detected. N is the
-    highest frame index + 1.
+    highest frame index + 1. on_frame(frames_done) is called after each frame.
     """
     detected = {hand: {} for hand in HANDS}
     last_index = -1
     with create_hand_tracker() as tracker:
-        for index, image in iter_frames(source):
+        for done, (index, image) in enumerate(iter_frames(source), start=1):
             last_index = index
+            if on_frame is not None:
+                on_frame(done)
             coords = detect_hand_coords(image, tracker)
             for hand in HANDS:
                 if coords[hand] is not None:
@@ -121,15 +161,73 @@ def detection_rates(raw):
     return {hand: float((~np.isnan(coords).any(axis=(1, 2))).mean()) for hand, coords in raw.items()}
 
 
-def extract_hand_positions(source):
+def extract_hand_positions(source, on_frame=None):
     """
     Video file or frame-image directory ->
     ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates). Positions
     are interpolated and wrist-relative, ready for window_features().
     """
-    raw = extract_raw_hand_coords(source)
+    positions, _, rates = extract_hand_tracks(source, on_frame)
+    return positions, rates
+
+
+def extract_hand_tracks(source, on_frame=None):
+    """
+    Like extract_hand_positions, plus each hand's wrist height and angle:
+    returns (positions, hand_states {"left": (N, 2), "right": (N, 2)}, detection rates).
+    """
+    raw = extract_raw_hand_coords(source, on_frame)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
-    return positions, detection_rates(raw)
+    states = {hand: hand_state(coords) for hand, coords in raw.items()}
+    return positions, states, detection_rates(raw)
+
+
+WRIST, MIDDLE_MCP = 0, 9
+
+
+def hand_state(raw_coords):
+    """
+    One hand's raw coordinates (N, 21, 3), NaN where undetected -> (N, 2):
+    wrist height and wrist angle per frame.
+
+    The thesis defines the high and low positions by the wrist angle (table
+    4.2), and the user decided both the height and the angle are used (see
+    TRAINING_DESIGN.md 6.4). Both are measured from the raw coordinates,
+    because wrist-relative positions have the hand's height removed.
+
+    - Height: how far the wrist is above the lowest wrist position seen in
+      this video, in palm lengths (wrist to middle-finger knuckle), so it does
+      not depend on how far the camera is.
+    - Angle: direction of the palm (wrist -> middle-finger knuckle) in the
+      image, in radians, 0 = pointing straight up. MediaPipe has no forearm
+      point, so this approximates the wrist angle by the palm's direction.
+
+    Frames are interpolated like the positions; frames before the first
+    detection are 0.
+    """
+    filled = fill_missing(raw_coords)
+    detected = ~np.isnan(np.asarray(raw_coords, dtype=np.float32)).any(axis=(1, 2))
+    states = np.zeros((len(filled), 2), dtype=np.float32)
+    if not detected.any():
+        return states
+    palm = filled[:, MIDDLE_MCP, :2] - filled[:, WRIST, :2]
+    palm_length = float(np.median(np.linalg.norm(palm[detected], axis=1))) or 1.0
+    wrist_y = filled[:, WRIST, 1]
+    lowest = float(wrist_y[detected].max())  # image y grows downward
+    first = int(np.flatnonzero(detected)[0])
+    states[first:, 0] = (lowest - wrist_y[first:]) / palm_length
+    states[first:, 1] = np.unwrap(np.arctan2(palm[first:, 0], -palm[first:, 1]))
+    return states
+
+
+def resample_length(values, length):
+    """Stretch or squeeze a sequence (T, ...) to `length` frames by linear interpolation in time."""
+    values = np.asarray(values, dtype=np.float32)
+    source = np.linspace(0.0, 1.0, len(values))
+    target = np.linspace(0.0, 1.0, length)
+    flat = values.reshape(len(values), -1)
+    out = np.stack([np.interp(target, source, flat[:, k]) for k in range(flat.shape[1])], axis=1)
+    return out.reshape((length,) + values.shape[1:]).astype(np.float32)
 
 
 def _with_velocity_and_acceleration(values):
@@ -145,6 +243,11 @@ def _with_velocity_and_acceleration(values):
     return np.concatenate([values, velocity, acceleration], axis=-1)
 
 
+def window_state_features(states):
+    """One window of one hand's (T, 2) wrist height and angle -> (T, 6): values, velocity, acceleration."""
+    return _with_velocity_and_acceleration(states)
+
+
 def window_features(positions):
     """
     One window of one hand's wrist-relative positions (T, 21, 3) ->
@@ -157,25 +260,35 @@ def window_features(positions):
 class FeatureScaler:
     """Per-channel standardization, fitted on training windows only."""
 
-    def __init__(self, joint_mean, joint_std, bone_mean, bone_std):
+    def __init__(self, joint_mean, joint_std, bone_mean, bone_std, state_mean=None, state_std=None):
         self.joint_mean, self.joint_std = joint_mean, joint_std
         self.bone_mean, self.bone_std = bone_mean, bone_std
+        self.state_mean, self.state_std = state_mean, state_std
 
     @classmethod
-    def fit(cls, joint_windows, bone_windows):
+    def fit(cls, joint_windows, bone_windows, state_windows=None):
         joints = np.concatenate([w.reshape(-1, 9) for w in joint_windows])
         bones = np.concatenate([w.reshape(-1, 9) for w in bone_windows])
-        return cls(joints.mean(axis=0), joints.std(axis=0) + 1e-6, bones.mean(axis=0), bones.std(axis=0) + 1e-6)
+        state_mean = state_std = None
+        if state_windows is not None:
+            states = np.concatenate([w.reshape(-1, w.shape[-1]) for w in state_windows])
+            state_mean, state_std = states.mean(axis=0), states.std(axis=0) + 1e-6
+        return cls(joints.mean(axis=0), joints.std(axis=0) + 1e-6, bones.mean(axis=0), bones.std(axis=0) + 1e-6,
+                   state_mean, state_std)
 
     def transform(self, joint_window, bone_window):
         return (joint_window - self.joint_mean) / self.joint_std, (bone_window - self.bone_mean) / self.bone_std
 
+    def transform_state(self, state_window):
+        return (state_window - self.state_mean) / self.state_std
+
     def state_dict(self):
-        return {k: np.asarray(v, dtype=np.float32).tolist() for k, v in vars(self).items()}
+        return {k: None if v is None else np.asarray(v, dtype=np.float32).tolist() for k, v in vars(self).items()}
 
     @classmethod
     def from_state_dict(cls, state):
-        return cls(**{k: np.asarray(v, dtype=np.float32) for k, v in state.items()})
+        # Checkpoints from before the hand-state option have no state_* keys.
+        return cls(**{k: None if v is None else np.asarray(v, dtype=np.float32) for k, v in state.items()})
 
 
 def pack_model_input(joint_window, bone_window, hand):

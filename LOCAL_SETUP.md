@@ -105,6 +105,16 @@ python train.py --data-dir data --csv-left-slot <left 或 right>
 
 驗證集是每支影片時間軸的最後一段，跟訓練用的片段不重疊，所以數字會比論文的隨機切分低，但比較可信。
 
+App 版的選項（預設都關閉，說明見 `TRAINING_DESIGN.md` 第 8 節）：`--embedding development`（不受速度影響的 Lie group 嵌入）、`--hand-state`（加入手腕高度與夾角）、`--time-stretch`（訓練時加入快慢不同的版本）。建議一次只開一個，和不加選項的結果比較。
+
+### 評估次數準不準
+
+```
+python evaluate.py --data-dir <沒用於訓練的影片資料夾> --checkpoint multi_motion_model_7class.pt
+```
+
+資料夾格式和 `data/` 相同（`<名稱>.csv` 加上同名的圖片資料夾或 `.mp4`），名稱不限，混合打法的影片也可以。逐手、逐種揮擊印出標註次數、偵測次數、誤差與事件層級的精確率、召回率、F1。這是判斷 App 能不能用的主要數字。
+
 ## 6. 啟動辨識服務
 
 ```
