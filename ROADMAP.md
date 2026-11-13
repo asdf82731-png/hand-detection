@@ -157,6 +157,8 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 | 執行訓練：`python train.py --data-dir data --csv-left-slot <left 或 right>`，把輸出貼給 Claude | Claude（在使用者電腦上） | ✅ 完成，兩種對應各跑一次，採用 `right`，見下方「2026-11-13 第一次訓練結果」 |
 | 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | ✅ 第一輪完成：驗證集、未訓練的後段幀、五支混合影片 |
 | 補標註：Up 的上揮、Down 第 1004 幀之後的下揮 | 使用者 | 待辦（使用者決定暫緩） |
+| 下次訓練前把 Down 的左右對調：用 `data\Down_swapped.csv`（只對調 hand 欄位，未進 git）取代 `Down.csv`，或補標時照鼓手的手寫左右 | 使用者 | 待辦。見下方「2026-11-13 自動標註對照」 |
+| 調整 `autolabel.py` 門檻（`HIT_SPEED`、`MOVE_SPEED`、高低分界），以 `check` 對人工標註的 F1 / kappa 為準 | Claude | 待辦。現在的輸出不能拿去訓練 |
 | 用新版 mediapipe（1.x，PR #4）在使用者電腦上重跑驗證 | 使用者（跑） / Claude（判讀） | ⏸ 暫緩（使用者 2026-11-13 決定先不重跑）。checkpoint 是用 mediapipe 0.10.21 抽的特徵訓練的；新舊版關鍵點比對幾乎相同、左右手標籤一致，但尚未用真實影片確認準確率 |
 | 決定是否達標、要不要再迭代（重新訓練） | 使用者 | ⏸ 暫緩（使用者 2026-11-13 決定先不重跑訓練） |
 | App 版：階段辨識 + 狀態機（`TRAINING_DESIGN.md` 第 5 節） | Claude | ⏸ 設計已寫好，實作等恢復重新訓練；實作前使用者要確認四種打法的高/低定義 |
@@ -181,6 +183,23 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 - **可能在認影片，不是認動作**：每支影片只有兩種標籤（例如 Full 只有 full / up_hold），驗證準確率有一部分可能來自認出是哪支影片。
 - **混合影片**：手部偵測率只有 23–75%，模型多半預測成 none / hold，揮擊次數偏少；沒有標籤，無法算準確率。
 - `Down_csv\down_stroke_data_raw.csv` 涵蓋到第 4470 幀，但 `stroke=1` 只出現在第 18–1003 幀，後面是沒標而不是 none，不能用來擴充。`Down labeling.csv`（人工標註）只到第 504 幀。
+
+### 2026-11-13 自動標註對照
+
+在使用者電腦上用 mediapipe 1.2.3 跑 `check_data.py` 與 `autolabel.py label/check`。
+
+- **Down 的左右確定相反**：`check_data` 動作量證據 Full / Up / Tab 指向 `right`（40.68、8.73、12.27 對 −19.65、−5.47、−6.94），Down 指向 `left`（35.43 對 −43.33）。預覽圖第 507 幀，CSV 寫 left 在下揮、right 是 none，畫面上正在揮的是 slot left 那隻手。Up、Tab 的證據較弱。
+- **autolabel 規則還不能用**：揮擊事件 F1（±3 幀）
+
+| 影片（`--csv-left-slot`） | left 手 | right 手 |
+|---|---|---|
+| Full（right） | 0.98，kappa 0.49 | 0.38（人工 30、自動 7） |
+| Down（left） | 0.07（人工 87、自動 3） | 0.74 |
+| Down（right） | 0.38 | 0.07 |
+| Up（right） | 人工沒有揮擊，自動多標 37 筆 | 0.00（人工 2、自動 3） |
+| Tab（right） | 0.16（人工 34、自動 3） | 0.26（人工 33、自動 5） |
+
+  主要錯誤是漏抓（Down、Tab 自動筆數遠少於人工）和誤判類型（Up、Tab、Down 影片裡標出 Full / Tab）；kappa 幾乎都低於 0.2。四支影片偵測率 88–99%，問題在門檻不在偵測。
 
 ## Phase 5 — 部署新模型
 
