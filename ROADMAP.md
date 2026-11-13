@@ -157,7 +157,7 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 | 執行訓練：`python train.py --data-dir data --csv-left-slot <left 或 right>`，把輸出貼給 Claude | Claude（在使用者電腦上） | ✅ 完成，兩種對應各跑一次，採用 `right`，見下方「2026-11-13 第一次訓練結果」 |
 | 新 checkpoint 驗證（混淆矩陣、真實影片比對，左右手分開看） | Claude | ✅ 第一輪完成：驗證集、未訓練的後段幀、五支混合影片 |
 | 補標註：Up 的上揮、Down 第 1004 幀之後的下揮 | 使用者 | 待辦（使用者決定暫緩） |
-| 下次訓練前把 Down 的左右對調：用 `data\Down_swapped.csv`（只對調 hand 欄位，未進 git）取代 `Down.csv`，或補標時照鼓手的手寫左右 | 使用者 | 待辦。見下方「2026-11-13 自動標註對照」 |
+| 下次訓練前把 Down 的左右對調：用 `data\Down_swapped_holdfix.csv`（對調 hand 欄位，並把 hold 改成 down_hold，未進 git）取代 `Down.csv`，或補標時照鼓手的手寫左右 | 使用者 | 待辦。見下方「2026-11-13 自動標註對照」與「2026-11-14 Down 的 hold 被讀成 none」 |
 | 調整 `autolabel.py` 門檻（`HIT_SPEED`、`MOVE_SPEED`、高低分界），以 `check` 對人工標註的 F1 / kappa 為準 | Claude | 偵測常數已調（`HIT_SPEED` 2.0、`HIT_DROP` 0.2、`STOP_SHARE` 0.5、`STOP_FRAMES` 5）：不分類型的揮擊 F1 Full+Tab 0.73→0.95、Down 0.80→0.91；分類型 F1 0.45→0.66、Down 0.40→0.47。高低分界調常數無效（影片內標準化後每支影片都會切成兩群）。類型判斷試過的做法都失敗，見下方「2026-11-13 類型判斷嘗試」；使用者 2026-11-14 選擇加 `--stroke-type`（類型由人依影片指定），分類型 F1 Tab 0.21 / 0.50→0.89 / 0.95、Down 0.21 / 0.74→0.88 / 0.95（左 / 右手），kappa 仍只有 0.12–0.31（逐幀的揮擊邊界和 hold 對不齊）。輸出仍不能拿去訓練，要人工修正 |
 | 用新版 mediapipe（1.x，PR #4）在使用者電腦上重跑驗證 | 使用者（跑） / Claude（判讀） | ⏸ 暫緩（使用者 2026-11-13 決定先不重跑）。checkpoint 是用 mediapipe 0.10.21 抽的特徵訓練的；新舊版關鍵點比對幾乎相同、左右手標籤一致，但尚未用真實影片確認準確率 |
 | 決定是否達標、要不要再迭代（重新訓練） | 使用者 | ⏸ 暫緩（使用者 2026-11-13 決定先不重跑訓練） |
@@ -225,6 +225,13 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 | Up | 人工只標了右手 2 次上揮，無法評估 | 同左 |
 
 Up 影片裡大部分揮擊沒標（見「補標註」待辦），所以 Up 量不出來。
+
+### 2026-11-14 Down 的 hold 被讀成 none
+
+Down.csv 的格式和其他三份不同：停頓記在 `motion_label=hold`，`stroke` 欄寫 `none`。`load_frame_labels` 只讀 `stroke` 欄，所以 1008 列 hold 被當成 none，**第一次訓練也是用這個錯的標籤**（同一種低位停頓，Tab 教成 down_hold、Down 教成 none）。拼圖確認這些幀手和鼓棒都停在打完後的低位，使用者決定標 down_hold。
+
+- 修正版：`data\Down_holdfix.csv`、`data\Down_swapped_holdfix.csv`（`hold`+`none` 的列改成 `down_hold`，其他欄位不變，未進 git）。原檔沒動。
+- 用修正版比對 `--stroke-type down_stroke`：kappa 左 / 右手 0.16 / 0.19→0.58 / 0.40，F1 不變。
 
 ## Phase 5 — 部署新模型
 
