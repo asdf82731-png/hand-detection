@@ -20,6 +20,10 @@ same model as before; see TRAINING_DESIGN.md):
     --select-by macro_f1      keep the epoch with the best average F1 over classes, not accuracy
     --pose-angle              with --hand-state: measure the wrist angle against the forearm, using
                               MediaPipe's body model for the elbow (extraction is several times slower)
+    --lstm-input 128          project each path to 128 features before its LSTM (4.34M -> 1.05M parameters)
+    --bidir-ends              backward LSTM read at the first step instead of the last
+    --no-output-gelu          no GELU on the class scores
+                              (these three: model.StrokeBiLSTMModel; flow report M1-M3, REV-8)
 
 --seed (default 0) fixes the random state, so two runs with the same data and
 options give the same model and differences between options can be trusted.
@@ -226,7 +230,7 @@ def macro_f1(y_true, y_pred):
 
 
 def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
-        weighted=False, select_by="accuracy", model=None):
+        weighted=False, select_by="accuracy", model=None, lstm_input=None, bidir_ends=False, output_gelu=True):
     """
     Trains and returns (best weights, their validation score), the best epoch
     being the one with the highest validation accuracy, or macro-F1 with
@@ -237,7 +241,9 @@ def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE)
 
     if model is None:
-        model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim)
+        model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim,
+                                  lstm_input=lstm_input, bidir_ends=bidir_ends, output_gelu=output_gelu)
+        print(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     weight = class_weights(train_set.tensors[-1].numpy(), len(LABELS)).to(device) if weighted else None
@@ -287,6 +293,12 @@ def main():
     parser.add_argument("--seed", type=int, default=0, help="random seed, for repeatable runs")
     parser.add_argument("--pose-angle", action="store_true",
                         help="with --hand-state: wrist angle against the forearm (body model for the elbow)")
+    parser.add_argument("--lstm-input", type=int, default=None,
+                        help="project each path to this many features before its LSTM (e.g. 128)")
+    parser.add_argument("--bidir-ends", action="store_true",
+                        help="read the backward LSTM at the first time step, the forward one at the last")
+    parser.add_argument("--no-output-gelu", dest="output_gelu", action="store_false",
+                        help="no GELU on the class scores")
     args = parser.parse_args()
     if args.pose_angle and not args.hand_state:
         parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
@@ -308,10 +320,12 @@ def main():
     best_state, best_score = fit(
         to_dataset(train_windows, scaler, args.hand_state), to_dataset(val_windows, scaler, args.hand_state), device,
         embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
+        lstm_input=args.lstm_input, bidir_ends=args.bidir_ends, output_gelu=args.output_gelu,
     )
     config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
-              "pose_angle": args.pose_angle}
+              "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
+              "output_gelu": args.output_gelu}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
          "config": config},

@@ -174,7 +174,8 @@ class StrokeBiLSTMModel(nn.Module):
 
     EMBEDDINGS = ("cumulative", "development")
 
-    def __init__(self, num_classes, embedding="cumulative", state_dim=0):
+    def __init__(self, num_classes, embedding="cumulative", state_dim=0,
+                 lstm_input=None, bidir_ends=False, output_gelu=True):
         """
         embedding: "cumulative" (linear map summed over frames; what existing
         checkpoints use) or "development" (PathDevelopment, the speed-invariant
@@ -182,28 +183,57 @@ class StrokeBiLSTMModel(nn.Module):
         state_dim: size of the per-frame hand-state features (wrist height and
         angle with velocity and acceleration: 6) appended to the joint path
         before its LSTM; 0 for none.
+
+        The last three fix implementation details (PEER_REVIEW REV-8, flow
+        report M1-M3); their defaults keep the original model, so existing
+        checkpoints load unchanged:
+        lstm_input: if set, each path's flattened graph output (42x64 or 20x64)
+            is projected to this many features before its LSTM (M1). The
+            LSTMs hold 99.8% of the original 4.3M parameters, trained on a few
+            thousand heavily overlapping windows.
+        bidir_ends: take the forward LSTM at the last step and the backward
+            LSTM at the first step (M2). At the last step the backward
+            direction has read only the last frame.
+        output_gelu: apply GELU to the class scores (M3, the original). GELU
+            floors scores at about -0.17, so wrong classes cannot be pushed
+            down, only the right one up.
         """
         super(StrokeBiLSTMModel, self).__init__()
         if embedding not in self.EMBEDDINGS:
             raise ValueError(f"embedding must be one of {self.EMBEDDINGS}, got {embedding!r}")
         self.embedding, self.state_dim = embedding, state_dim
+        self.lstm_input, self.bidir_ends, self.output_gelu = lstm_input, bidir_ends, output_gelu
 
         def embed():
             return LieGroupEmbedding(input_dim=9, lie_dim=16) if embedding == "cumulative" else PathDevelopment()
 
+        def project(nodes):
+            return nn.Linear(64 * nodes, lstm_input) if lstm_input else nn.Identity()
+
+        path_size = {nodes: lstm_input or 64 * nodes for nodes in (42, 20)}
+
         self.lie_embed_joint = embed()
         self.adj_joint = SimilarityAdjacency(input_dim=16, embed_dim=32)
         self.gcn_joint = ResidualGCNLayer(in_channels=16, out_channels=64)
-        self.lstm_joint = nn.LSTM(input_size=64 * 42 + state_dim, hidden_size=128, batch_first=True, bidirectional=True)
+        self.proj_joint = project(42)
+        self.lstm_joint = nn.LSTM(input_size=path_size[42] + state_dim, hidden_size=128, batch_first=True,
+                                  bidirectional=True)
 
         self.lie_embed_bone = embed()
         self.adj_bone = SimilarityAdjacency(input_dim=16, embed_dim=32)
         self.gcn_bone = ResidualGCNLayer(in_channels=16, out_channels=64)
-        self.lstm_bone = nn.LSTM(input_size=64 * 20, hidden_size=128, batch_first=True, bidirectional=True)
+        self.proj_bone = project(20)
+        self.lstm_bone = nn.LSTM(input_size=path_size[20], hidden_size=128, batch_first=True, bidirectional=True)
 
         self.dropout = nn.Dropout(0.5)
         self.fc = nn.Linear(4 * 128, num_classes)
-        self.gelu = nn.GELU()
+        self.gelu = nn.GELU() if output_gelu else nn.Identity()
+
+    def _summary(self, out):
+        """(B, T, 256) Bi-LSTM output -> (B, 256) for the classifier."""
+        if self.bidir_ends:
+            return torch.cat([out[:, -1, :128], out[:, 0, 128:]], dim=1)
+        return out[:, -1]
 
     def forward(self, x, state=None):
         """x: (B, T, 62, 9). state: (B, T, state_dim), required when state_dim > 0."""
@@ -211,14 +241,14 @@ class StrokeBiLSTMModel(nn.Module):
 
         x_joint = self.lie_embed_joint(x[:, :, :42, :])  # (B, T, 42, 16)
         x_joint = self.gcn_joint(x_joint, self.adj_joint(x_joint))  # (B, T, 42, 64)
-        x_joint = x_joint.reshape(B, T, -1)
+        x_joint = self.proj_joint(x_joint.reshape(B, T, -1))
         if self.state_dim:
             x_joint = torch.cat([x_joint, state], dim=-1)
         out_joint, _ = self.lstm_joint(x_joint)  # (B, T, 256)
 
         x_bone = self.lie_embed_bone(x[:, :, 42:, :])  # (B, T, 20, 16)
         x_bone = self.gcn_bone(x_bone, self.adj_bone(x_bone))  # (B, T, 20, 64)
-        out_bone, _ = self.lstm_bone(x_bone.reshape(B, T, -1))  # (B, T, 256)
+        out_bone, _ = self.lstm_bone(self.proj_bone(x_bone.reshape(B, T, -1)))  # (B, T, 256)
 
-        fused = torch.cat([out_joint[:, -1], out_bone[:, -1]], dim=1)  # (B, 512)
+        fused = torch.cat([self._summary(out_joint), self._summary(out_bone)], dim=1)  # (B, 512)
         return self.gelu(self.fc(self.dropout(fused)))  # (B, num_classes)

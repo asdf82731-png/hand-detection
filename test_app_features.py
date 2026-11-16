@@ -66,7 +66,65 @@ class TestOldCheckpoint(unittest.TestCase):
         # options existed.
         model, scaler, _ = load_checkpoint("multi_motion_model_7class.pt", torch.device("cpu"))
         self.assertEqual((model.embedding, model.state_dim), ("cumulative", 0))
+        self.assertEqual((model.lstm_input, model.bidir_ends, model.output_gelu), (None, False, True))
         self.assertIsNone(scaler.state_mean)
+
+
+class TestArchitectureFixes(unittest.TestCase):
+    # Flow report M1-M3 (REV-8). Off by default so old checkpoints still load.
+
+    def test_projection_shrinks_the_lstms(self):
+        # M1: the LSTMs held 99.8% of 4.3M parameters for a few thousand
+        # overlapping windows; projecting first must cut that sharply.
+        from model import StrokeBiLSTMModel
+        count = lambda m: sum(p.numel() for p in m.parameters())
+        original, compact = StrokeBiLSTMModel(7), StrokeBiLSTMModel(7, state_dim=6, lstm_input=128)
+        self.assertLess(count(compact), count(original) / 4)
+        out = compact.eval()(torch.randn(2, 30, 62, 9), torch.randn(2, 30, 6))
+        self.assertEqual(out.shape, (2, 7))
+
+    def test_bidir_ends_lets_the_backward_direction_see_the_whole_window(self):
+        # M2: read at the last step, the backward LSTM has seen only the last
+        # frame, so earlier frames cannot change that half of the summary.
+        from model import StrokeBiLSTMModel
+        torch.manual_seed(0)
+        lstm = torch.nn.LSTM(8, 128, batch_first=True, bidirectional=True)
+        x = torch.randn(1, 30, 8)
+        y = x.clone()
+        y[:, :-1] += 1.0  # change every frame but the last
+        for bidir_ends, should_change in ((False, False), (True, True)):
+            model = StrokeBiLSTMModel(7, bidir_ends=bidir_ends)
+            backward = [model._summary(lstm(v)[0])[:, 128:] for v in (x, y)]
+            self.assertEqual(not torch.allclose(*backward), should_change, f"bidir_ends={bidir_ends}")
+
+    def test_without_output_gelu_wrong_classes_can_be_scored_low(self):
+        # M3: GELU floors every score at about -0.17.
+        from model import StrokeBiLSTMModel
+        x = torch.randn(2, 30, 62, 9)
+        for output_gelu in (True, False):
+            model = StrokeBiLSTMModel(7, output_gelu=output_gelu).eval()
+            with torch.no_grad():
+                model.fc.bias.fill_(-5.0)
+                model.fc.weight.zero_()
+                lowest = float(model(x).min())
+            if output_gelu:
+                self.assertGreater(lowest, -0.2)
+            else:
+                self.assertAlmostEqual(lowest, -5.0, places=4)
+
+    def test_checkpoint_rebuilds_the_architecture_it_was_trained_with(self):
+        import os, tempfile
+        from features import FeatureScaler
+        from model import StrokeBiLSTMModel
+        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False}
+        model = StrokeBiLSTMModel(7, **config)
+        scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "m.pt")
+            torch.save({"model_state": model.state_dict(), "scaler": scaler.state_dict(), "labels": list(range(7)),
+                        "hand_to_slot": {"left": "left", "right": "right"}, "config": config}, path)
+            loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
+        self.assertEqual((loaded.lstm_input, loaded.bidir_ends, loaded.output_gelu), (128, True, False))
 
 
 def _raw_hand(wrist_y, palm=(0.0, -50.0), scale=1.0):

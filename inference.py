@@ -44,6 +44,9 @@ def load_checkpoint(path, device):
         num_classes=len(checkpoint["labels"]),
         embedding=config.get("embedding", "cumulative"),
         state_dim=config.get("state_dim", 0),
+        lstm_input=config.get("lstm_input"),
+        bidir_ends=config.get("bidir_ends", False),
+        output_gelu=config.get("output_gelu", True),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
