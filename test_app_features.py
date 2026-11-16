@@ -473,3 +473,72 @@ class TestLongGaps(unittest.TestCase):
         at_60 = gap_windows(detected_60, 60.0)
         self.assertEqual(len(at_60), 120 - WINDOW_SIZE + 1)  # 4 s at 30fps
         self.assertTrue(at_60[30] and not at_60[36] and not at_60[-1])  # window i covers frames i to i+29
+
+
+class TestFeatureOptions(unittest.TestCase):
+    # Flow report F2, F4, F5: training options, off by default, applied the
+    # same way at inference through features.window_inputs.
+
+    def test_backward_differences_give_the_last_frame_its_motion(self):
+        # F2: a window is labeled by its last frame and the LSTM output is read
+        # there, yet the thesis layout leaves that frame's velocity at 0.
+        from features import window_features
+        positions = np.zeros((6, 21, 3), dtype=np.float32)
+        positions[:, 8, 0] = np.arange(6) ** 2
+        forward, _ = window_features(positions)
+        backward, _ = window_features(positions, backward=True)
+        self.assertEqual(forward[-1, 8, 3], 0.0)
+        self.assertEqual(backward[-1, 8, 3], 9.0)    # 25 - 16
+        self.assertEqual(backward[-1, 8, 6], 2.0)
+        self.assertFalse(backward[0, :, 3:].any())   # padding moved to the start
+
+    def test_palm_scale_makes_camera_distance_irrelevant(self):
+        # F4: a hand twice as close is twice as big in pixels; in palm lengths
+        # it is the same hand.
+        import features
+        rng = np.random.default_rng(4)
+        near = rng.uniform(100, 300, size=(10, 21, 3)).astype(np.float32)
+        near[..., 2] = 0.0
+        far = near * np.array([0.5, 0.5, 1.0], dtype=np.float32)
+        results = []
+        original = features.extract_raw_tracks
+        try:
+            for raw in (near, far):
+                features.extract_raw_tracks = lambda *a, raw=raw: ({"left": raw, "right": raw},
+                                                                   {h: np.full((10, 2), np.nan) for h in ("left", "right")})
+                results.append(features.extract_hand_tracks("unused", palm_scale=True)[0]["left"])
+        finally:
+            features.extract_raw_tracks = original
+        np.testing.assert_allclose(results[0], results[1], atol=1e-4)
+
+    def test_mirrored_right_hand_looks_like_a_left_hand(self):
+        # F5: the same stroke played by the right hand, seen in a mirror, must
+        # reach the model exactly as the left hand's does, in the same slot.
+        from features import window_inputs
+        rng = np.random.default_rng(5)
+        left = rng.normal(size=(30, 21, 3)).astype(np.float32)
+        right = left * np.array([-1.0, 1.0, 1.0], dtype=np.float32)
+        left_states = rng.normal(size=(30, 2)).astype(np.float32)
+        right_states = left_states * np.array([1.0, -1.0], dtype=np.float32)  # the wrist angle flips too
+        a = window_inputs(left, left_states, "left", mirror_hands=True)
+        b = window_inputs(right, right_states, "right", mirror_hands=True)
+        self.assertEqual((a[3], b[3]), ("left", "left"))
+        for x, y in zip(a[:3], b[:3]):
+            np.testing.assert_allclose(x, y, atol=1e-5)
+        self.assertEqual(window_inputs(right, right_states, "right")[3], "right")  # off by default
+
+    def test_checkpoint_applies_the_feature_options_it_was_trained_with(self):
+        import os, tempfile
+        from features import FeatureScaler
+        from model import StrokeBiLSTMModel
+        config = {"backward_diff": True, "palm_scale": True, "mirror_hands": True}
+        scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "m.pt")
+            torch.save({"model_state": StrokeBiLSTMModel(7).state_dict(), "scaler": scaler.state_dict(),
+                        "labels": list(range(7)), "hand_to_slot": {"left": "left", "right": "right"},
+                        "config": config}, path)
+            loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
+        self.assertEqual((loaded.backward_diff, loaded.palm_scale, loaded.mirror_hands), (True, True, True))
+        old, _, _ = load_checkpoint("multi_motion_model_7class.pt", torch.device("cpu"))
+        self.assertEqual((old.backward_diff, old.palm_scale, old.mirror_hands), (False, False, False))

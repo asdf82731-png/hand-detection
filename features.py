@@ -233,15 +233,21 @@ def extract_hand_positions(source, on_frame=None):
     return positions, rates
 
 
-def extract_hand_tracks(source, on_frame=None, with_pose=False):
+def extract_hand_tracks(source, on_frame=None, with_pose=False, palm_scale=False):
     """
     Like extract_hand_positions, plus each hand's wrist height and angle and
     which frames the hand was really detected in: returns (positions,
     hand_states {"left": (N, 2), ...}, detection rates, detected {"left": (N,) bool, ...}).
     with_pose measures the wrist angle against the forearm (see hand_state).
+    palm_scale divides the positions' x and y by the hand's median palm length
+    in the video, so a hand twice as far from the camera gives the same
+    numbers (flow report F4); z is MediaPipe's own unit and is left as is.
     """
     raw, elbows = extract_raw_tracks(source, on_frame, with_pose)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
+    if palm_scale:
+        for hand, coords in raw.items():
+            positions[hand][..., :2] /= palm_length(coords)
     states = {hand: hand_state(coords, elbows[hand] if with_pose else None) for hand, coords in raw.items()}
     detected = {hand: ~np.isnan(coords).any(axis=(1, 2)) for hand, coords in raw.items()}
     return positions, states, detection_rates(raw), detected
@@ -277,6 +283,15 @@ def _fill_all(values):
     return np.stack([np.interp(frames, frames[known], values[known, k]) for k in range(values.shape[1])], axis=1)
 
 
+def palm_length(raw_coords):
+    """Median wrist-to-middle-knuckle distance (x, y) over the frames the hand was detected in; 1.0 if never."""
+    coords = np.asarray(raw_coords, dtype=np.float32)
+    detected = ~np.isnan(coords).any(axis=(1, 2))
+    if not detected.any():
+        return 1.0
+    return float(np.median(np.linalg.norm(coords[detected, MIDDLE_MCP, :2] - coords[detected, WRIST, :2], axis=1))) or 1.0
+
+
 def hand_state(raw_coords, elbows=None):
     """
     One hand's raw coordinates (N, 21, 3), NaN where undetected -> (N, 2):
@@ -307,11 +322,10 @@ def hand_state(raw_coords, elbows=None):
     if not detected.any():
         return states
     palm = filled[:, MIDDLE_MCP, :2] - filled[:, WRIST, :2]
-    palm_length = float(np.median(np.linalg.norm(palm[detected], axis=1))) or 1.0
     wrist_y = filled[:, WRIST, 1]
     lowest = float(wrist_y[detected].max())  # image y grows downward
     first = int(np.flatnonzero(detected)[0])
-    states[first:, 0] = (lowest - wrist_y[first:]) / palm_length
+    states[first:, 0] = (lowest - wrist_y[first:]) / palm_length(raw_coords)
     if elbows is not None and (~np.isnan(np.asarray(elbows, dtype=np.float32)).any(axis=1)).any():
         forearm = filled[:, WRIST, :2] - _fill_all(elbows)
         cross = forearm[:, 0] * palm[:, 1] - forearm[:, 1] * palm[:, 0]
@@ -332,31 +346,65 @@ def resample_length(values, length):
     return out.reshape((length,) + values.shape[1:]).astype(np.float32)
 
 
-def _with_velocity_and_acceleration(values):
+def _with_velocity_and_acceleration(values, backward=False):
     """
     (T, K, 3) -> (T, K, 9): value, frame-to-frame velocity, acceleration.
     Differencing leaves one fewer velocity and two fewer accelerations than
-    frames; the tail is zero-padded (thesis A23).
+    frames; the tail is zero-padded (thesis A23). With backward, velocity is
+    this frame minus the previous one and the padding is at the start instead
+    (flow report F2): the window's label and the LSTM's output are both
+    taken at the last frame, which the thesis layout leaves without motion.
     """
     velocity = np.zeros_like(values)
-    velocity[:-1] = values[1:] - values[:-1]
     acceleration = np.zeros_like(values)
-    acceleration[:-2] = velocity[1:-1] - velocity[:-2]
+    if backward:
+        velocity[1:] = values[1:] - values[:-1]
+        acceleration[2:] = velocity[2:] - velocity[1:-1]
+    else:
+        velocity[:-1] = values[1:] - values[:-1]
+        acceleration[:-2] = velocity[1:-1] - velocity[:-2]
     return np.concatenate([values, velocity, acceleration], axis=-1)
 
 
-def window_state_features(states):
+def window_state_features(states, backward=False):
     """One window of one hand's (T, 2) wrist height and angle -> (T, 6): values, velocity, acceleration."""
-    return _with_velocity_and_acceleration(states)
+    return _with_velocity_and_acceleration(states, backward)
 
 
-def window_features(positions):
+def window_features(positions, backward=False):
     """
     One window of one hand's wrist-relative positions (T, 21, 3) ->
     (joint features (T, 21, 9), bone features (T, 20, 9)) (thesis A22).
     """
     bones = np.stack([positions[:, j2] - positions[:, j1] for j1, j2 in BONE_CONNECTIONS], axis=1)
-    return _with_velocity_and_acceleration(positions), _with_velocity_and_acceleration(bones)
+    return _with_velocity_and_acceleration(positions, backward), _with_velocity_and_acceleration(bones, backward)
+
+
+# x of position, velocity and acceleration in the 9 joint / bone channels,
+# and the wrist angle with its velocity and acceleration in the 6 state channels.
+_X_CHANNELS = [0, 3, 6]
+_ANGLE_CHANNELS = [1, 3, 5]
+
+
+def window_inputs(positions, states, hand, backward=False, mirror_hands=False):
+    """
+    One window of one hand: positions (T, 21, 3), states (T, 2) -> (joint
+    features, bone features, state features, model slot). Training and
+    inference both build windows here, so they always match.
+
+    mirror_hands (flow report F5): the right hand is mirrored left-to-right
+    (x and the wrist angle change sign) and fed through the left-hand slot,
+    so both hands train the same weights instead of each its own half.
+    """
+    joints, bones = window_features(positions, backward)
+    state_features = window_state_features(states, backward)
+    if mirror_hands and hand == "right":
+        joints, bones, state_features = joints.copy(), bones.copy(), state_features.copy()
+        joints[..., _X_CHANNELS] *= -1
+        bones[..., _X_CHANNELS] *= -1
+        state_features[..., _ANGLE_CHANNELS] *= -1
+        hand = "left"
+    return joints, bones, state_features, hand
 
 
 class FeatureScaler:

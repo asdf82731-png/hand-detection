@@ -8,7 +8,7 @@ import torch
 
 from features import (
     FeatureScaler, extract_hand_tracks, long_gaps, pack_model_input, resample_to_fps, source_frame_count, video_fps,
-    window_features, window_state_features,
+    window_inputs,
 )
 from model import StrokeBiLSTMModel
 from pipeline import LABELS
@@ -59,6 +59,11 @@ def load_checkpoint(path, device):
     # Whether the hand-state wrist angle was measured against the forearm;
     # inference must measure it the same way.
     model.pose_angle = bool(config.get("pose_angle", False))
+    # Feature options (features.window_inputs / extract_hand_tracks), applied
+    # exactly as in training.
+    model.backward_diff = bool(config.get("backward_diff", False))
+    model.palm_scale = bool(config.get("palm_scale", False))
+    model.mirror_hands = bool(config.get("mirror_hands", False))
     return model, FeatureScaler.from_state_dict(checkpoint["scaler"]), checkpoint["hand_to_slot"]
 
 
@@ -70,18 +75,22 @@ def predict_window_labels(positions, slot, model, scaler, device, states=None):
     hand-state features. Windows are built one batch at a time, so a long
     video does not need all of them in memory at once.
     """
+    if states is None:  # only read when the model uses hand-state features
+        states = np.zeros((len(positions), 2), dtype=np.float32)
     starts = range(len(positions) - WINDOW_SIZE + 1)
     labels = []
     for i in range(0, len(starts), BATCH_SIZE):
         batch = starts[i:i + BATCH_SIZE]
-        inputs = np.stack([
-            pack_model_input(*scaler.transform(*window_features(positions[s:s + WINDOW_SIZE])), slot) for s in batch
-        ])
+        windows = [
+            window_inputs(positions[s:s + WINDOW_SIZE], states[s:s + WINDOW_SIZE], slot,
+                          getattr(model, "backward_diff", False), getattr(model, "mirror_hands", False))
+            for s in batch
+        ]
+        inputs = np.stack([pack_model_input(*scaler.transform(joints, bones), packed_slot)
+                           for joints, bones, _, packed_slot in windows])
         args = [torch.from_numpy(inputs).to(device)]
         if model.state_dim:
-            state_inputs = np.stack([
-                scaler.transform_state(window_state_features(states[s:s + WINDOW_SIZE])) for s in batch
-            ]).astype(np.float32)
+            state_inputs = np.stack([scaler.transform_state(state) for _, _, state, _ in windows]).astype(np.float32)
             args.append(torch.from_numpy(state_inputs).to(device))
         labels.extend(model(*args).argmax(dim=1).tolist())
     return labels
@@ -205,7 +214,7 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
             report(DETECTION_SHARE * min(done / total, 1.0))
 
     positions, states, detection_rate, detected = extract_hand_tracks(
-        source, on_frame, getattr(model, "pose_angle", False))
+        source, on_frame, getattr(model, "pose_angle", False), getattr(model, "palm_scale", False))
     fps = video_fps(source)
     resampled = to_training_fps(positions, fps)
     frame_scale = 1.0

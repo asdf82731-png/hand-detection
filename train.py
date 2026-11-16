@@ -25,6 +25,10 @@ same model as before; see TRAINING_DESIGN.md):
     --bidir-ends              backward LSTM read at the first step instead of the last
     --no-output-gelu          no GELU on the class scores
                               (these three: model.StrokeBiLSTMModel; flow report M1-M3, REV-8)
+    --backward-diff           velocity = this frame minus the previous, so the last frame has motion (F2)
+    --palm-scale              positions in palm lengths, not pixels, so camera distance does not matter (F4)
+    --mirror-hands            mirror the right hand and train both hands on the same weights (F5)
+                              (these three: features.window_inputs / extract_hand_tracks)
 
 --seed (default 0) fixes the random state, so two runs with the same data and
 options give the same model and differences between options can be trusted.
@@ -41,7 +45,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from data_pipeline import LABELS, build_labeled_windows, load_frame_labels, split_train_val
 from features import (
-    FeatureScaler, extract_hand_tracks, pack_model_input, resample_length, window_features, window_state_features,
+    FeatureScaler, extract_hand_tracks, pack_model_input, resample_length, window_inputs,
 )
 from model import StrokeBiLSTMModel
 
@@ -101,16 +105,16 @@ def video_hand_mapping(spec, name):
     return hand_mapping(overrides.get(name, default))
 
 
-def _sample(positions, states, first, span, slot, label):
+def _sample(positions, states, first, span, slot, label, backward_diff=False, mirror_hands=False):
     """
     The window of `span` frames starting at `first`, resampled to WINDOW_SIZE
-    frames if span differs -> (joint features, bone features, state features, slot, label).
+    frames if span differs -> (joint features, bone features, state features, model slot, label).
     """
     window_positions, window_states = positions[first:first + span], states[first:first + span]
     if span != WINDOW_SIZE:
         window_positions = resample_length(window_positions, WINDOW_SIZE)
         window_states = resample_length(window_states, WINDOW_SIZE)
-    return (*window_features(window_positions), window_state_features(window_states), slot, label)
+    return (*window_inputs(window_positions, window_states, slot, backward_diff, mirror_hands), label)
 
 
 def stretched_starts(start):
@@ -125,7 +129,8 @@ def stretched_starts(start):
     return [(end - span, span) for span in spans if end - span >= 0]
 
 
-def load_split_windows(data_dir, csv_left_slot, time_stretch=False, pose_angle=False):
+def load_split_windows(data_dir, csv_left_slot, time_stretch=False, pose_angle=False,
+                       backward_diff=False, palm_scale=False, mirror_hands=False):
     """
     Returns (train, val): lists of (joint_window, bone_window, state_window, slot, label)
     built from every video in data_dir that has a CSV. csv_left_slot is a
@@ -135,15 +140,17 @@ def load_split_windows(data_dir, csv_left_slot, time_stretch=False, pose_angle=F
     each of TIME_STRETCH_FACTORS (see stretched_starts). A longer span reaches
     further back in time, which stays inside the training part because
     training precedes validation in the split. Validation windows are never
-    stretched.
+    stretched. backward_diff, palm_scale and mirror_hands as in features.window_inputs
+    and features.extract_hand_tracks.
     """
     train, val = [], []
+    options = {"backward_diff": backward_diff, "mirror_hands": mirror_hands}
     for name in VIDEO_NAMES:
         source, csv_path = data_sources(data_dir, name)
         if not (os.path.exists(source) and os.path.exists(csv_path)):
             print(f"[SKIPPED] {name}: need {csv_path} and either a {name}/ frame folder or {name}.mp4 in {data_dir}")
             continue
-        positions, states, detection_rate, _ = extract_hand_tracks(source, with_pose=pose_angle)
+        positions, states, detection_rate, _ = extract_hand_tracks(source, with_pose=pose_angle, palm_scale=palm_scale)
         num_frames = len(positions["left"])
         frame_labels = load_frame_labels(csv_path)
         if max(frame_labels) >= num_frames:
@@ -158,9 +165,9 @@ def load_split_windows(data_dir, csv_left_slot, time_stretch=False, pose_angle=F
             split = split_train_val(windows, max(frame_labels) + 1, WINDOW_SIZE, first_frame=min(frame_labels))
             for split_windows, target, stretch in zip(split, (train, val), (time_stretch, False)):
                 for start, label in split_windows:
-                    target.append(_sample(positions[slot], states[slot], start, WINDOW_SIZE, slot, label))
+                    target.append(_sample(positions[slot], states[slot], start, WINDOW_SIZE, slot, label, **options))
                     for first, span in (stretched_starts(start) if stretch else []):
-                        target.append(_sample(positions[slot], states[slot], first, span, slot, label))
+                        target.append(_sample(positions[slot], states[slot], first, span, slot, label, **options))
         print(
             f"[LOADED] {name} from {source}: {num_frames} frames, {len(frame_labels)} labeled, "
             f"detected left {detection_rate['left']:.0%} / right {detection_rate['right']:.0%}"
@@ -326,6 +333,11 @@ def main():
                         help="read the backward LSTM at the first time step, the forward one at the last")
     parser.add_argument("--no-output-gelu", dest="output_gelu", action="store_false",
                         help="no GELU on the class scores")
+    parser.add_argument("--backward-diff", action="store_true",
+                        help="velocity as this frame minus the previous, so the window's last frame has motion")
+    parser.add_argument("--palm-scale", action="store_true", help="positions in palm lengths instead of pixels")
+    parser.add_argument("--mirror-hands", action="store_true",
+                        help="mirror the right hand into the left-hand slot so both hands share the weights")
     args = parser.parse_args()
     if args.pose_angle and not args.hand_state:
         parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
@@ -333,7 +345,8 @@ def main():
     csv_hand_to_slot = hand_mapping(args.csv_left_slot[0])  # what inference reports as left / right
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_windows, val_windows = load_split_windows(args.data_dir, args.csv_left_slot, args.time_stretch, args.pose_angle)
+    train_windows, val_windows = load_split_windows(args.data_dir, args.csv_left_slot, args.time_stretch, args.pose_angle,
+                                                    args.backward_diff, args.palm_scale, args.mirror_hands)
     print(f"train windows: {len(train_windows)}, val windows: {len(val_windows)}, device: {device}")
     for split_name, windows in (("train", train_windows), ("val", val_windows)):
         counts = np.bincount([label for *_, label in windows], minlength=len(LABELS))
@@ -352,7 +365,8 @@ def main():
     config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
-              "output_gelu": args.output_gelu, "csv_left_slot_overrides": args.csv_left_slot[1]}
+              "output_gelu": args.output_gelu, "csv_left_slot_overrides": args.csv_left_slot[1],
+              "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
          "config": config},
