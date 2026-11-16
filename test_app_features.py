@@ -286,19 +286,23 @@ class TestForearmWristAngle(unittest.TestCase):
 
 class TestElbowMatching(unittest.TestCase):
     def test_the_arm_whose_wrist_is_nearest_the_hand_is_taken(self):
-        from features import REFERENCE_HEIGHT, REFERENCE_WIDTH, match_elbow
+        # In a portrait frame too: the pose model's normalized coordinates must
+        # be scaled like the hand's, or the elbow lands off the arm.
+        from features import match_elbow
         coords, _ = _hand_with_arm(0.0, 0.0, frames=1)
         hand = coords[0]
-        near_wrist = (hand[0, 0] / REFERENCE_WIDTH + 0.005, hand[0, 1] / REFERENCE_HEIGHT)
-        far_wrist = (0.1, 0.1)
-        elbow = match_elbow(hand, [((0.2, 0.2), far_wrist), ((0.5, 0.9), near_wrist)])
-        np.testing.assert_allclose(elbow, [0.5 * REFERENCE_WIDTH, 0.9 * REFERENCE_HEIGHT], atol=1e-3)
+        for width, height in ((1280, 720), (720, 1280)):
+            with self.subTest(frame=(width, height)):
+                near_wrist = (hand[0, 0] / width + 0.005, hand[0, 1] / height)
+                far_wrist = (0.1, 0.1)
+                elbow = match_elbow(hand, [((0.2, 0.2), far_wrist), ((0.5, 0.9), near_wrist)], (width, height))
+                np.testing.assert_allclose(elbow, [0.5 * width, 0.9 * height], atol=1e-3)
 
     def test_an_arm_too_far_from_the_hand_is_not_used(self):
         # The other person's arm, or the other arm, must not be paired.
         from features import match_elbow
         coords, _ = _hand_with_arm(0.0, 0.0, frames=1)
-        self.assertIsNone(match_elbow(coords[0], [((0.0, 0.0), (0.05, 0.05))]))
+        self.assertIsNone(match_elbow(coords[0], [((0.0, 0.0), (0.05, 0.05))], (1280, 720)))
 
 
 class TestTrainingHelpers(unittest.TestCase):

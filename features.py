@@ -14,9 +14,11 @@ import numpy as np
 from data_pipeline import parse_frame_id
 from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, create_pose_tracker, read_upright_frames
 
-# x/y are scaled to pixel positions in this frame size (the training videos'
-# own resolution) whatever the input resolution, so the same motion gives the
-# same numbers for a 720p and a 1080p upload.
+# x/y are scaled to pixel positions as if the frame were the training videos'
+# 1280x720: the short side becomes 720 and both axes get the same factor
+# (reference_size), so the same motion gives the same numbers for a 720p and a
+# 1080p upload, and a portrait upload is measured in a 720x1280 frame instead
+# of being squashed into 1280x720.
 REFERENCE_WIDTH = 1280
 REFERENCE_HEIGHT = 720
 
@@ -24,21 +26,28 @@ HANDS = ("left", "right")
 _SLOT_TO_HAND = {"Left": "left", "Right": "right"}
 
 
+def reference_size(width, height):
+    """A frame's size in reference pixels: short side scaled to REFERENCE_HEIGHT, aspect ratio kept."""
+    scale = REFERENCE_HEIGHT / min(width, height)
+    return width * scale, height * scale
+
+
 def detect_hand_coords(image, hands):
     """
     One frame -> {"left": (21, 3) or None, "right": (21, 3) or None}, keyed by
-    MediaPipe's handedness slot. x/y in reference-frame pixels, z as MediaPipe
-    reports it. `hands` is a tracker from pipeline.create_hand_tracker().
+    MediaPipe's handedness slot. x/y in reference pixels (reference_size), z
+    as MediaPipe reports it. `hands` is a tracker from pipeline.create_hand_tracker().
     """
     labels, scores, hands_landmarks = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     coords = {"left": None, "right": None}
     if hands_landmarks:
+        width, height = reference_size(image.shape[1], image.shape[0])
         slots = _assign_hand_slots(labels, scores, [np.mean([lm.x for lm in hl]) for hl in hands_landmarks])
         for hand_landmarks, slot in zip(hands_landmarks, slots):
             if slot is None:
                 continue
             coords[_SLOT_TO_HAND[slot]] = np.array(
-                [[lm.x * REFERENCE_WIDTH, lm.y * REFERENCE_HEIGHT, lm.z] for lm in hand_landmarks],
+                [[lm.x * width, lm.y * height, lm.z] for lm in hand_landmarks],
                 dtype=np.float32,
             )
     return coords
@@ -133,22 +142,23 @@ def resample_to_fps(positions, fps, target_fps):
 ARM_MATCH_PALMS = 2.0
 
 
-def match_elbow(hand_coords, arms):
+def match_elbow(hand_coords, arms, frame_size):
     """
     One detected hand (21, 3) in reference pixels and the pose arms of the same
     frame [(elbow, wrist)] in normalized coordinates -> that hand's elbow (x, y)
-    in reference pixels, or None. The arm whose wrist is nearest the hand's
-    wrist is taken, if it is within ARM_MATCH_PALMS palm lengths; pose
-    left/right labels are not trusted.
+    in reference pixels, or None. frame_size is the frame's reference_size().
+    The arm whose wrist is nearest the hand's wrist is taken, if it is within
+    ARM_MATCH_PALMS palm lengths; pose left/right labels are not trusted.
     """
+    width, height = frame_size
     wrist = hand_coords[WRIST, :2]
     palm = float(np.linalg.norm(hand_coords[MIDDLE_MCP, :2] - wrist)) or 1.0
     best, best_distance = None, ARM_MATCH_PALMS * palm
     for elbow, arm_wrist in arms:
-        arm_wrist = np.array([arm_wrist[0] * REFERENCE_WIDTH, arm_wrist[1] * REFERENCE_HEIGHT])
+        arm_wrist = np.array([arm_wrist[0] * width, arm_wrist[1] * height])
         distance = float(np.linalg.norm(arm_wrist - wrist))
         if distance <= best_distance:
-            best = np.array([elbow[0] * REFERENCE_WIDTH, elbow[1] * REFERENCE_HEIGHT], dtype=np.float32)
+            best = np.array([elbow[0] * width, elbow[1] * height], dtype=np.float32)
             best_distance = distance
     return best
 
@@ -175,10 +185,11 @@ def extract_raw_tracks(source, on_frame=None, with_pose=False):
                     on_frame(done)
                 coords = detect_hand_coords(image, tracker)
                 arms = pose.arms(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)) if pose else []
+                frame_size = reference_size(image.shape[1], image.shape[0])
                 for hand in HANDS:
                     if coords[hand] is not None:
                         detected[hand][index] = coords[hand]
-                        elbow = match_elbow(coords[hand], arms) if arms else None
+                        elbow = match_elbow(coords[hand], arms, frame_size) if arms else None
                         if elbow is not None:
                             elbow_found[hand][index] = elbow
     finally:

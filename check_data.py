@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from data_pipeline import LABELS, load_frame_labels
-from features import HANDS, detection_rates, extract_raw_hand_coords, iter_frames
+from features import HANDS, detection_rates, extract_raw_hand_coords, iter_frames, reference_size
 from train import VIDEO_NAMES, data_sources
 
 STROKE_LABELS = set(LABELS[:4])
@@ -75,7 +75,8 @@ def save_preview(source, raw, frame_labels, path):
     for index, image in iter_frames(source):
         if index != target:
             continue
-        scale_x, scale_y = image.shape[1] / 1280, image.shape[0] / 720  # raw coords are in the 1280x720 reference frame
+        width, height = reference_size(image.shape[1], image.shape[0])
+        scale_x, scale_y = image.shape[1] / width, image.shape[0] / height  # raw coords are in reference pixels
         for hand in HANDS:
             xs, ys = raw[hand][target][:, 0] * scale_x, raw[hand][target][:, 1] * scale_y
             top_left = (int(xs.min()), int(ys.min()))
