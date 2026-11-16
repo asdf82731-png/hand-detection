@@ -226,16 +226,19 @@ def macro_f1(y_true, y_pred):
 
 
 def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
-        weighted=False, select_by="accuracy"):
+        weighted=False, select_by="accuracy", model=None):
     """
     Trains and returns (best weights, their validation score), the best epoch
     being the one with the highest validation accuracy, or macro-F1 with
-    select_by="macro_f1".
+    select_by="macro_f1". model replaces the thesis model (baselines.py
+    trains its GRU baseline through the same loop).
     """
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE)
 
-    model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim).to(device)
+    if model is None:
+        model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim)
+    model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     weight = class_weights(train_set.tensors[-1].numpy(), len(LABELS)).to(device) if weighted else None
     if weight is not None:
