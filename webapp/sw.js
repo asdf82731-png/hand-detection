@@ -1,7 +1,7 @@
 // Service worker: keeps the app shell available offline and makes the app
 // installable. Analysis needs the server, so API calls and result images are
 // never cached. Bump CACHE when any shell file changes.
-const CACHE = "stroke-counter-v2";
+const CACHE = "stroke-counter-v3";
 const SHELL = [
   "/",
   "/manifest.webmanifest",

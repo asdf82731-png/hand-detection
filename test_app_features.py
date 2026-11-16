@@ -459,6 +459,31 @@ class TestLongGaps(unittest.TestCase):
         self.assertEqual(len(stroke_spans(run + [GAP_LABEL] * MIN_RUN_WINDOWS + run)), 2)
         self.assertEqual(len(stroke_spans([GAP_LABEL] * 10)), 0)
 
+    def test_the_time_left_uncounted_is_reported(self):
+        # One 7-frame miss discards every window that touches it: 1.2 s in
+        # which strokes are played but not counted. Reported, a lower count
+        # can be told apart from fewer strokes played. A hand never seen
+        # leaves every window uncounted.
+        import inference
+        frames = 300
+        detected = {"left": np.ones(frames, dtype=bool), "right": np.zeros(frames, dtype=bool)}
+        detected["left"][100:107] = False
+        positions = {hand: np.zeros((frames, 21, 3), dtype=np.float32) for hand in detected}
+        states = {hand: np.zeros((frames, 2), dtype=np.float32) for hand in detected}
+        rates = {hand: float(flags.mean()) for hand, flags in detected.items()}
+        fakes = {"extract_hand_tracks": lambda *a: (positions, states, rates, detected),
+                 "video_fps": lambda source: 30.0, "source_frame_count": lambda source: frames,
+                 "predict_window_labels": lambda positions, *a: [NONE] * (len(positions) - WINDOW_SIZE + 1)}
+        originals = {name: getattr(inference, name) for name in fakes}
+        try:
+            for name, fake in fakes.items():
+                setattr(inference, name, fake)
+            result = inference.analyze("unused", None, None, {"left": "left", "right": "right"}, None)
+        finally:
+            for name, original in originals.items():
+                setattr(inference, name, original)
+        self.assertEqual(result["uncounted_seconds"], {"left": 1.2, "right": round((frames - WINDOW_SIZE + 1) / 30, 2)})
+
     def test_gap_windows_line_up_with_the_predicted_windows(self):
         # One flag per window as predict_window_labels makes them, also when a
         # 60fps upload is resampled to 30fps.

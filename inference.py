@@ -33,7 +33,9 @@ MIN_RUN_WINDOWS = 3
 
 # Undetected gaps longer than this are not interpolated over for counting:
 # windows that touch one get GAP_LABEL, which is never counted and separates
-# strokes (flow report H2). 0.2 s is a first guess, not tuned.
+# strokes (flow report H2). 0.2 s is a first guess, not tuned. A window holds
+# WINDOW_SIZE frames, so the second after a gap goes uncounted with it;
+# analyze reports the total per hand as uncounted_seconds.
 MAX_FILL_SECONDS = 0.2
 GAP_LABEL = -1
 
@@ -208,7 +210,12 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         "detection_rate": {"left": 0-1, "right": 0-1},
         "frame_scale": source frames per analysis frame (1.0 unless resampled),
         "times": {"left": [{"stroke": name, "start_s": s, "end_s": s}], ...},
+        "uncounted_seconds": {"left": s, "right": s},
     }
+    uncounted_seconds is how much of the video had no strokes counted for that
+    hand because it went undetected for too long (gap_windows); the whole
+    video for a hand never seen. Without it a lower count looks like fewer
+    strokes played.
     with left/right meaning what they meant in the training labels. Frames are
     counted at TRAIN_FPS after any resampling. on_progress(fraction) is called
     as the work advances, ending at 1.0.
@@ -231,22 +238,25 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
     positions = resampled
     report(DETECTION_SHARE)
 
-    result = {"events": {}, "spans": {}, "metrics": {}, "detection_rate": {}, "frame_scale": frame_scale, "times": {}}
+    result = {"events": {}, "spans": {}, "metrics": {}, "detection_rate": {}, "frame_scale": frame_scale, "times": {},
+              "uncounted_seconds": {}}
     analysis_fps = (fps or TRAIN_FPS) / frame_scale  # TRAIN_FPS after resampling, else the video's own rate
     for hand, slot in hand_to_slot.items():
         if len(positions[slot]) < WINDOW_SIZE:
             raise ValueError(f"Video too short (min {WINDOW_SIZE} frames required)")
+        gaps = gap_windows(detected[slot], fps)
         if detection_rate[slot] == 0:
             spans = []  # hand never seen: nothing to classify
         else:
             labels = predict_window_labels(positions[slot], slot, model, scaler, device, states[slot])
-            labels = [GAP_LABEL if gap else label for label, gap in zip(labels, gap_windows(detected[slot], fps))]
+            labels = [GAP_LABEL if gap else label for label, gap in zip(labels, gaps)]
             spans = stroke_spans(labels)
         result["events"][hand] = [label for label, _, _ in spans]
         result["spans"][hand] = spans
         result["metrics"][hand] = stroke_metrics(spans, states[slot])
         result["detection_rate"][hand] = round(detection_rate[slot], 3)
         result["times"][hand] = stroke_times(spans, analysis_fps)
+        result["uncounted_seconds"][hand] = round(sum(gaps) / analysis_fps, 2)
     report(1.0)
     return result
 
