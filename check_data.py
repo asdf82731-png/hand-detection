@@ -66,6 +66,23 @@ def recommend_csv_left_slot(total_scores):
     return "left" if same > swapped else "right"
 
 
+def suggested_csv_left_slot(per_video):
+    """
+    {video: "left" / "right" / None} -> a --csv-left-slot value such as
+    "left,Down=right", or None if no video gives a clear answer. The most
+    common answer is the default and the others become exceptions; adding all
+    videos' evidence together would hide one video whose CSV names the hands
+    the other way (flow report D3). Unclear videos follow the default.
+    """
+    clear = {name: slot for name, slot in per_video.items() if slot is not None}
+    if not clear:
+        return None
+    slots = list(clear.values())
+    default = max(("left", "right"), key=slots.count)
+    exceptions = [f"{name}={slot}" for name, slot in clear.items() if slot != default]
+    return ",".join([default] + exceptions)
+
+
 def save_preview(source, raw, frame_labels, path):
     """One labeled frame with each detected hand boxed and named, to check orientation and left/right by eye."""
     both = [f for f in sorted(frame_labels) if f < len(raw["left"]) and not any(np.isnan(raw[h][f]).any() for h in HANDS)]
@@ -122,6 +139,7 @@ def check_action(data_dir, name):
 
     scores = mapping_scores(frame_labels, {hand: hand_speed(raw[hand]) for hand in HANDS})
     print(f"  hand mapping evidence: CSV left = slot left -> {scores['same']:.2f},  CSV left = slot right -> {scores['swapped']:.2f}")
+    print(f"  suggested for this video: {recommend_csv_left_slot(scores) or 'too close to call'}")
 
     preview_path = os.path.join(data_dir, f"check_preview_{name}.jpg")
     target = save_preview(source, raw, frame_labels, preview_path)
@@ -135,29 +153,28 @@ def main():
     parser.add_argument("--data-dir", default="data")
     args = parser.parse_args()
 
-    total = {"same": 0.0, "swapped": 0.0}
-    usable = []
+    per_video = {}
     for name in VIDEO_NAMES:
         scores = check_action(args.data_dir, name)
         if scores is not None:
-            usable.append(name)
-            for key in total:
-                total[key] += scores[key]
+            per_video[name] = recommend_csv_left_slot(scores)
+    usable = list(per_video)
 
     print("\n=== Summary ===")
     print(f"  usable actions: {usable or 'none'}")
     if not usable:
         print("  Nothing to train on yet — fix the problems above.")
         return
-    slot = recommend_csv_left_slot(total)
-    print(f"  hand mapping totals: CSV left = slot left -> {total['same']:.2f},  CSV left = slot right -> {total['swapped']:.2f}")
-    print("  Confirm with the check_preview_*.jpg images: is the hand in the 'slot left' box the one the CSV")
-    print("  calls left? Then the answer is --csv-left-slot left; if the CSV calls that hand right, it is right.")
-    if slot is None:
-        print("  The motion evidence is too close to call, so the images decide.")
+    spec = suggested_csv_left_slot(per_video)
+    print(f"  hand mapping per video: {per_video}")
+    print("  Confirm with each check_preview_*.jpg image: is the hand in the 'slot left' box the one that")
+    print("  video's CSV calls left? Then that video is left; if the CSV calls that hand right, it is right.")
+    print("  Videos that differ from the rest are written as exceptions, e.g. --csv-left-slot left,Down=right")
+    if spec is None:
+        print("  The motion evidence is too close to call for every video, so the images decide.")
     else:
-        print(f"  The motion evidence suggests: --csv-left-slot {slot}  (a suggestion; the images decide)")
-    print(f"  Then:  python train.py --data-dir {args.data_dir} --csv-left-slot <left or right>")
+        print(f"  The motion evidence suggests: --csv-left-slot {spec}  (a suggestion; the images decide)")
+    print(f"  Then:  python train.py --data-dir {args.data_dir} --csv-left-slot <value>")
 
 
 if __name__ == "__main__":

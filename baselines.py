@@ -34,7 +34,7 @@ from autolabel import label_source
 from data_pipeline import LABEL_TO_INDEX, LABELS, build_labeled_windows, load_frame_labels, parse_frame_id, split_train_val
 from features import FeatureScaler
 from train import (
-    VIDEO_NAMES, WINDOW_SIZE, data_sources, fit, hand_mapping, load_split_windows, macro_f1, set_seed, to_dataset,
+    VIDEO_NAMES, WINDOW_SIZE, csv_left_slot_spec, data_sources, fit, load_split_windows, macro_f1, set_seed, to_dataset,
 )
 
 STROKE_TYPE_OF_VIDEO = {"Full": "full_stroke", "Down": "down_stroke", "Up": "up_stroke", "Tab": "tab_stroke"}
@@ -64,7 +64,8 @@ def rule_baseline(data_dir, csv_left_slot, with_type):
         if not (os.path.exists(source) and os.path.exists(csv_path)):
             continue  # skipped by load_split_windows too
         human = load_frame_labels(csv_path)
-        rows = label_source(source, csv_left_slot, stroke_type=STROKE_TYPE_OF_VIDEO[name] if with_type else None)
+        default, overrides = csv_left_slot
+        rows = label_source(source, overrides.get(name, default), stroke_type=STROKE_TYPE_OF_VIDEO[name] if with_type else None)
         rule = {}
         for frame_id, hand, label in rows:
             rule.setdefault(parse_frame_id(frame_id), {})[hand] = label
@@ -101,12 +102,12 @@ def scores(y_true, y_pred):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--csv-left-slot", required=True, choices=["left", "right"])
+    parser.add_argument("--csv-left-slot", required=True, type=csv_left_slot_spec, help="as for train.py")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     set_seed(args.seed)
 
-    train_windows, val_windows = load_split_windows(args.data_dir, hand_mapping(args.csv_left_slot))
+    train_windows, val_windows = load_split_windows(args.data_dir, args.csv_left_slot)
     train_labels = np.array([label for *_, label in train_windows])
     val_labels = [label for *_, label in val_windows]
     results = {"majority": scores(val_labels, majority_predictions(train_labels, len(val_labels)))}

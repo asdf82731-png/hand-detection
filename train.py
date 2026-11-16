@@ -3,6 +3,7 @@ Train the 7-class stroke model with the thesis method (see TRAINING_DESIGN.md).
 
     python check_data.py --data-dir data          (first: checks the data, says which --csv-left-slot to use)
     python train.py --data-dir data --csv-left-slot left
+    python train.py --data-dir data --csv-left-slot left,Down=right   (a video whose CSV calls the hands the other way)
 
 `data/` holds, for each of Full/Down/Up/Tab, the label file <Name>.csv plus
 either a folder <Name>/ of frame images (frame_0026.jpg, ...) or a video
@@ -75,6 +76,31 @@ def hand_mapping(csv_left_slot):
     return {"left": csv_left_slot, "right": "right" if csv_left_slot == "left" else "left"}
 
 
+def csv_left_slot_spec(text):
+    """
+    --csv-left-slot value -> (default slot, {video name: slot}): "left" or
+    "right", optionally followed by exceptions for single videos, e.g.
+    "left,Down=right". One mapping for all videos trains a video whose CSV
+    names the hands the other way on swapped labels (flow report D3).
+    """
+    default, *exceptions = [part.strip() for part in text.split(",")]
+    overrides = {}
+    for exception in exceptions:
+        name, _, slot = exception.partition("=")
+        if name not in VIDEO_NAMES or slot not in ("left", "right"):
+            raise argparse.ArgumentTypeError(f"{exception!r}: expected <video>=<left|right>, video one of {VIDEO_NAMES}")
+        overrides[name] = slot
+    if default not in ("left", "right"):
+        raise argparse.ArgumentTypeError(f"{default!r}: expected left or right first")
+    return default, overrides
+
+
+def video_hand_mapping(spec, name):
+    """The hand_mapping for one video under a csv_left_slot_spec."""
+    default, overrides = spec
+    return hand_mapping(overrides.get(name, default))
+
+
 def _sample(positions, states, first, span, slot, label):
     """
     The window of `span` frames starting at `first`, resampled to WINDOW_SIZE
@@ -99,10 +125,11 @@ def stretched_starts(start):
     return [(end - span, span) for span in spans if end - span >= 0]
 
 
-def load_split_windows(data_dir, csv_hand_to_slot, time_stretch=False, pose_angle=False):
+def load_split_windows(data_dir, csv_left_slot, time_stretch=False, pose_angle=False):
     """
     Returns (train, val): lists of (joint_window, bone_window, state_window, slot, label)
-    built from every video in data_dir that has a CSV.
+    built from every video in data_dir that has a CSV. csv_left_slot is a
+    csv_left_slot_spec.
 
     With time_stretch, every training window is also added as if played at
     each of TIME_STRETCH_FACTORS (see stretched_starts). A longer span reaches
@@ -124,7 +151,7 @@ def load_split_windows(data_dir, csv_hand_to_slot, time_stretch=False, pose_angl
                 f"{name}: CSV labels frame {max(frame_labels)} but {source} has only frames 0-{num_frames - 1} "
                 "— the CSV does not line up with these frames."
             )
-        for csv_hand, slot in csv_hand_to_slot.items():
+        for csv_hand, slot in video_hand_mapping(csv_left_slot, name).items():
             windows = build_labeled_windows(frame_labels, csv_hand, num_frames, WINDOW_SIZE, TRAIN_STEP)
             # Split over the labeled frames only: the real frame folders are
             # 2-4x longer than the range the CSV labels.
@@ -279,7 +306,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data")
     parser.add_argument(
-        "--csv-left-slot", required=True, choices=["left", "right"],
+        "--csv-left-slot", required=True, type=csv_left_slot_spec,
         help="which detected hand the CSV's 'left' rows describe; check_data.py prints the value to use",
     )
     parser.add_argument("--embedding", default="cumulative", choices=StrokeBiLSTMModel.EMBEDDINGS,
@@ -303,10 +330,10 @@ def main():
     if args.pose_angle and not args.hand_state:
         parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
     set_seed(args.seed)
-    csv_hand_to_slot = hand_mapping(args.csv_left_slot)
+    csv_hand_to_slot = hand_mapping(args.csv_left_slot[0])  # what inference reports as left / right
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_windows, val_windows = load_split_windows(args.data_dir, csv_hand_to_slot, args.time_stretch, args.pose_angle)
+    train_windows, val_windows = load_split_windows(args.data_dir, args.csv_left_slot, args.time_stretch, args.pose_angle)
     print(f"train windows: {len(train_windows)}, val windows: {len(val_windows)}, device: {device}")
     for split_name, windows in (("train", train_windows), ("val", val_windows)):
         counts = np.bincount([label for *_, label in windows], minlength=len(LABELS))
@@ -325,7 +352,7 @@ def main():
     config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
-              "output_gelu": args.output_gelu}
+              "output_gelu": args.output_gelu, "csv_left_slot_overrides": args.csv_left_slot[1]}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
          "config": config},

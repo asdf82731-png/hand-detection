@@ -87,7 +87,7 @@ python check_data.py --data-dir data
 3. **預覽圖**：
    - 人應該是正的（頭在上、打擊板在下）。如果是顛倒的，先停下來告訴 Claude。
    - 圖上兩個綠框分別標著 `slot left`、`slot right`，下方紅字是這一幀 CSV 的左右手標籤。看 `slot left` 框住的那隻手，在 CSV 裡是 left 還是 right。
-4. **Summary 的 `--csv-left-slot`**：程式依「標成揮擊的幀，手應該動得比較多」推測的建議值。它只是參考，**以預覽圖為準**：`slot left` 框住的手在 CSV 裡叫 left，就用 `left`；叫 right，就用 `right`。
+4. **Summary 的 `--csv-left-slot`**：程式依「標成揮擊的幀，手應該動得比較多」逐支影片推測的建議值。它只是參考，**以每支影片的預覽圖為準**：`slot left` 框住的手在 CSV 裡叫 left，那支影片就是 `left`；叫 right，就是 `right`。如果有影片跟其他支相反，寫成例外，例如 `left,Down=right`。
 
 鏡頭正對鼓手時，畫面左邊的手是鼓手的右手。所以如果 CSV 的 left/right 指的是鼓手自己的左右手，答案通常是 `right`。
 
@@ -96,7 +96,7 @@ python check_data.py --data-dir data
 ## 5. 訓練
 
 ```
-python train.py --data-dir data --csv-left-slot <left 或 right>
+python train.py --data-dir data --csv-left-slot <left 或 right，例外寫成 left,Down=right>
 ```
 
 每個 epoch 印一行 loss 和驗證準確率，結束時印出各類別的 precision / recall / F1、混淆矩陣、AUC-ROC，並存成 `multi_motion_model_7class.pt`（約 17MB）。

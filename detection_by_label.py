@@ -20,7 +20,7 @@ import numpy as np
 
 from data_pipeline import load_frame_labels
 from features import extract_raw_hand_coords
-from train import VIDEO_NAMES, data_sources, hand_mapping
+from train import VIDEO_NAMES, csv_left_slot_spec, data_sources, video_hand_mapping
 
 GROUPS = {
     "stroke": {"full_stroke", "down_stroke", "up_stroke", "tab_stroke"},
@@ -58,7 +58,7 @@ def detection_by_group(frame_labels, csv_hand, detected):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--csv-left-slot", required=True, choices=["left", "right"])
+    parser.add_argument("--csv-left-slot", required=True, type=csv_left_slot_spec, help="as for train.py")
     args = parser.parse_args()
 
     print(f"{'video':6s} {'hand':5s} {'group':6s} {'frames':>6s} {'detected':>8s} {'longest gap':>11s}")
@@ -69,7 +69,7 @@ def main():
             continue
         frame_labels = load_frame_labels(csv_path)
         raw = extract_raw_hand_coords(source)
-        for csv_hand, slot in hand_mapping(args.csv_left_slot).items():
+        for csv_hand, slot in video_hand_mapping(args.csv_left_slot, name).items():
             detected = ~np.isnan(raw[slot]).any(axis=(1, 2))
             for group, (count, rate, gap) in detection_by_group(frame_labels, csv_hand, detected).items():
                 shown = "-" if rate is None else f"{rate:.0%}"
