@@ -219,6 +219,18 @@ class TestEventEvaluation(unittest.TestCase):
         self.assertEqual((result["precision"], result["recall"]), (0.5, 1.0))
 
 
+class TestSpeedCeiling(unittest.TestCase):
+    # TRAINING_DESIGN.md 10.1 promises users at most 5 strokes per hand per
+    # second at 30fps (16ths up to 150 BPM). If MIN_RUN_WINDOWS changes, this
+    # fails and the documented range must be recomputed.
+
+    def test_three_frame_strokes_and_holds_are_each_counted(self):
+        self.assertEqual(len(stroke_spans(([DOWN] * 3 + [DOWN_HOLD] * 3) * 4)), 4)
+
+    def test_a_two_frame_hold_merges_strokes_so_faster_playing_is_undercounted(self):
+        self.assertEqual(len(stroke_spans(([DOWN] * 3 + [DOWN_HOLD] * 2) * 4)), 1)
+
+
 class TestEvaluationProtocol(unittest.TestCase):
     # REV-7: a reported number must come from unseen videos, weigh rare stroke
     # types equally, and carry an interval that respects correlated strokes.
