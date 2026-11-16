@@ -17,7 +17,7 @@ import tempfile
 from evaluate import block_counts, check_independent, labeled_strokes, macro_f1, match_events, score, summarize
 from features import hand_state, resample_length
 from inference import WINDOW_SIZE, load_checkpoint, stroke_metrics, stroke_spans
-from model import LieGroupEmbedding, PathDevelopment
+from model import CumulativeEmbedding, PathDevelopment
 from pipeline import build_suggestions, expected_count_accuracy
 from train import TIME_STRETCH_FACTORS, stretched_starts
 
@@ -54,7 +54,7 @@ class TestPathDevelopment(unittest.TestCase):
     def test_the_original_cumulative_embedding_does_depend_on_speed(self):
         # Pins why PathDevelopment was added: summing a linear map over frames
         # gives a different result when the same path takes more frames.
-        emb = LieGroupEmbedding(input_dim=9, lie_dim=16)
+        emb = CumulativeEmbedding(input_dim=9, embed_dim=16)
         fast, slow = emb(_path(11)), emb(_path(21))
         self.assertGreater((fast[0, -1] - slow[0, -1]).abs().max().item(), 0.1)
 
