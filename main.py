@@ -70,6 +70,7 @@ class RecognitionResponse(BaseModel):
     accuracy_basis: dict = {}
     stroke_metrics: dict = {}
     detection_rate: dict = {}
+    stroke_times: dict = {}
 
     
 ALLOWED_EXTENSIONS = (".mp4", ".mov", ".avi")
@@ -167,7 +168,7 @@ def _analyze(temp_path, vid_id, expected=None, on_progress=None):
     print(f"[DEBUG] Stroke events - left: {len(events['left'])}, right: {len(events['right'])}")
     results = evaluate_event_metrics(events["left"], events["right"], CM_BASE_URL, vid_id, STATIC_DIR, expected)
     return {"status": "success", **results, "stroke_metrics": analysis["metrics"],
-            "detection_rate": analysis["detection_rate"]}
+            "detection_rate": analysis["detection_rate"], "stroke_times": analysis["times"]}
 
 
 def _remove(temp_path):

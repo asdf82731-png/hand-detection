@@ -175,6 +175,12 @@ def stroke_metrics(spans, states, fps=TRAIN_FPS):
     return {"strokes": strokes, "interval_s_mean": interval_mean, "interval_s_cv": interval_cv}
 
 
+def stroke_times(spans, fps):
+    """Stroke spans -> [{"stroke": name, "start_s", "end_s"}] in seconds from the start of the video (flow report I1)."""
+    return [{"stroke": LABELS[label], "start_s": round(first / fps, 3), "end_s": round((last + 1) / fps, 3)}
+            for label, first, last in spans]
+
+
 def gap_windows(detected, fps):
     """
     One hand's detected flags at the source frame rate -> for every window at
@@ -201,6 +207,7 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         "metrics": {"left": stroke_metrics(...), ...},
         "detection_rate": {"left": 0-1, "right": 0-1},
         "frame_scale": source frames per analysis frame (1.0 unless resampled),
+        "times": {"left": [{"stroke": name, "start_s": s, "end_s": s}], ...},
     }
     with left/right meaning what they meant in the training labels. Frames are
     counted at TRAIN_FPS after any resampling. on_progress(fraction) is called
@@ -224,7 +231,8 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
     positions = resampled
     report(DETECTION_SHARE)
 
-    result = {"events": {}, "spans": {}, "metrics": {}, "detection_rate": {}, "frame_scale": frame_scale}
+    result = {"events": {}, "spans": {}, "metrics": {}, "detection_rate": {}, "frame_scale": frame_scale, "times": {}}
+    analysis_fps = (fps or TRAIN_FPS) / frame_scale  # TRAIN_FPS after resampling, else the video's own rate
     for hand, slot in hand_to_slot.items():
         if len(positions[slot]) < WINDOW_SIZE:
             raise ValueError(f"Video too short (min {WINDOW_SIZE} frames required)")
@@ -238,6 +246,7 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         result["spans"][hand] = spans
         result["metrics"][hand] = stroke_metrics(spans, states[slot])
         result["detection_rate"][hand] = round(detection_rate[slot], 3)
+        result["times"][hand] = stroke_times(spans, analysis_fps)
     report(1.0)
     return result
 

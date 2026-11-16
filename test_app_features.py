@@ -542,3 +542,14 @@ class TestFeatureOptions(unittest.TestCase):
         self.assertEqual((loaded.backward_diff, loaded.palm_scale, loaded.mirror_hands), (True, True, True))
         old, _, _ = load_checkpoint("multi_motion_model_7class.pt", torch.device("cpu"))
         self.assertEqual((old.backward_diff, old.palm_scale, old.mirror_hands), (False, False, False))
+
+
+class TestStrokeTimes(unittest.TestCase):
+    def test_spans_become_seconds_from_the_start(self):
+        # Flow report I1: counts alone cannot be drawn on a timeline or
+        # checked against the video.
+        from inference import stroke_times
+        times = stroke_times([(0, 30, 44), (2, 90, 104)], 30.0)
+        self.assertEqual(times[0], {"stroke": "Full", "start_s": 1.0, "end_s": 1.5})
+        self.assertEqual(times[1]["stroke"], "Up")
+        self.assertEqual(stroke_times([(1, 60, 74)], 60.0)[0]["start_s"], 1.0)  # the analysis frame rate decides
