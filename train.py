@@ -25,6 +25,7 @@ same model as before; see TRAINING_DESIGN.md):
 options give the same model and differences between options can be trusted.
 """
 import argparse
+import hashlib
 import os
 import random
 
@@ -196,6 +197,12 @@ def one_vs_rest_auc(y_true, y_prob):
     return aucs
 
 
+def file_sha256(path):
+    """Content hash of a label CSV; evaluate.py compares it with the evaluation CSVs."""
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def set_seed(seed):
     """Fix every random source training uses, so a run can be repeated exactly."""
     random.seed(seed)
@@ -308,7 +315,10 @@ def main():
     )
     config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
-              "pose_angle": args.pose_angle}
+              "pose_angle": args.pose_angle,
+              # evaluate.py refuses to score a checkpoint on its own training videos.
+              "train_csv_sha256": [file_sha256(data_sources(args.data_dir, name)[1]) for name in VIDEO_NAMES
+                                   if os.path.exists(data_sources(args.data_dir, name)[1])]}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
          "config": config},
