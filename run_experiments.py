@@ -12,8 +12,11 @@ models in the app, copy it over that file yourself.
 
 A run whose model file already exists is not repeated, so an interrupted
 run can be restarted with the same command; delete the file to redo it.
+--out-dir remembers the --data-dir and --csv-left-slot it was started with
+(settings.json) and refuses others, so its table never mixes models trained
+on different data or hand mappings.
 Each train.py run reads the videos and detects the hands again, so one run
-takes minutes: 11 experiments x 5 seeds is a long job.
+takes minutes: 12 experiments x 5 seeds is a long job.
 
 Results go to <out-dir>/results.md. With one seed, a difference between two
 rows can be noise; use several seeds and trust only differences larger than
@@ -33,12 +36,14 @@ from train import csv_left_slot_spec
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # (name, extra train.py arguments). "baseline" is the current default model;
-# every other row changes one thing so its effect can be read off directly.
+# every other row changes one thing from the row it is compared with
+# (COMPARED_WITH, else "baseline"), so its effect can be read off directly.
 EXPERIMENTS = [
     ("baseline", []),
     ("development", ["--embedding", "development"]),      # path development, the thesis's Lie group claim
     ("hand_state", ["--hand-state"]),                      # wrist height and angle (thesis table 4.2)
     ("time_stretch", ["--time-stretch"]),
+    ("select_macro_f1", ["--select-by", "macro_f1"]),
     ("class_weights", ["--class-weights", "--select-by", "macro_f1"]),  # T1
     ("backward_diff", ["--backward-diff"]),                # F2
     ("palm_scale", ["--palm-scale"]),                      # F4
@@ -47,14 +52,50 @@ EXPERIMENTS = [
     ("bidir_ends", ["--bidir-ends"]),                      # M2
     ("no_output_gelu", ["--no-output-gelu"]),              # M3
 ]
+# Class weights are meant to go with macro-F1 selection, and choosing the
+# epoch by macro-F1 raises macro-F1 by itself: against "baseline" that gain
+# would be credited to the weights.
+COMPARED_WITH = {"class_weights": "select_macro_f1"}
 STROKES = ["full_stroke", "down_stroke", "up_stroke", "tab_stroke"]
 
 
 def run(command, log_path):
-    """Run a command with its output going to log_path; True if it succeeded."""
+    """
+    Run a command with its output going to log_path; True if it succeeded.
+    It runs in the caller's folder, so a relative --data-dir or --out-dir
+    means the same place to it as to this script.
+    """
     with open(log_path, "w", encoding="utf-8") as log:
-        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, cwd=HERE)
+        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
     return result.returncode == 0
+
+
+def chosen_experiments(only):
+    """EXPERIMENTS limited to the names in `only` (all if empty), plus "baseline" and the rows they are compared with."""
+    names = set(only or [name for name, _ in EXPERIMENTS]) | {"baseline"}
+    names |= {COMPARED_WITH[name] for name in names if name in COMPARED_WITH}
+    return [(name, extra) for name, extra in EXPERIMENTS if name in names]
+
+
+def claim_out_dir(out_dir, settings):
+    """
+    Make out_dir and record the settings its results are for, or raise
+    ValueError if it already holds results for other settings (or from before
+    they were recorded): finished runs are reused, so the table would show
+    old models under the new settings.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "settings.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            found = json.load(f)
+        if found != settings:
+            raise ValueError(f"{out_dir} holds results for {found}, not {settings}: use another --out-dir or delete it")
+    elif any(name.endswith((".pt", ".json")) for name in os.listdir(out_dir)):
+        raise ValueError(f"{out_dir} holds results with no record of their settings: use another --out-dir or delete it")
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
 
 
 def train_command(args, extra, seed, out_path):
@@ -77,16 +118,20 @@ def results_table(model_rows, baseline_rows):
     model_rows: {experiment: [val_metrics per seed]} (train.py's checkpoint
     "val_metrics"); baseline_rows: {baseline name: [{"accuracy", "macro_f1"} per seed]}.
     -> Markdown: one row per experiment and baseline, mean ± sd over seeds,
-    and each experiment's macro-F1 change against "baseline".
+    and each experiment's macro-F1 change against the row it is compared with
+    ("baseline" unless COMPARED_WITH names another, which the cell then says).
     """
-    base_f1 = np.mean([m["macro_f1"] for m in model_rows["baseline"]]) if model_rows.get("baseline") else None
     header = ["experiment", "seeds", "accuracy", "macro-F1", "Δ macro-F1"] + [f"F1 {s.split('_')[0]}" for s in STROKES]
     lines = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for name, runs in model_rows.items():
         if not runs:
             continue
-        f1 = np.mean([m["macro_f1"] for m in runs])
-        delta = "-" if base_f1 is None or name == "baseline" else f"{f1 - base_f1:+.3f}"
+        reference = COMPARED_WITH.get(name, "baseline")
+        if name == "baseline" or not model_rows.get(reference):
+            delta = "-"
+        else:
+            delta = f'{np.mean([m["macro_f1"] for m in runs]) - np.mean([m["macro_f1"] for m in model_rows[reference]]):+.3f}'
+            delta += "" if reference == "baseline" else f" vs {reference}"
         cells = [name, str(len(runs)), mean_sd([m["accuracy"] for m in runs]), mean_sd([m["macro_f1"] for m in runs]),
                  delta] + [mean_sd([m["f1"].get(s) for m in runs]) for s in STROKES]
         lines.append("| " + " | ".join(cells) + " |")
@@ -104,16 +149,19 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=[0])
     parser.add_argument("--out-dir", default="experiments")
     parser.add_argument("--only", nargs="+", choices=[name for name, _ in EXPERIMENTS],
-                        help="run only these experiments (baseline is always included)")
+                        help="run only these experiments (baseline and the rows they are compared with are always included)")
     parser.add_argument("--skip-baselines", action="store_true", help="do not run baselines.py / detection_by_label.py")
     args = parser.parse_args()
     try:
-        csv_left_slot_spec(args.csv_left_slot)  # refuse a bad value before hours of training
+        spec = csv_left_slot_spec(args.csv_left_slot)  # refuse a bad value before hours of training
     except argparse.ArgumentTypeError as error:
         parser.error(f"--csv-left-slot: {error}")
-    os.makedirs(args.out_dir, exist_ok=True)
+    try:
+        claim_out_dir(args.out_dir, {"data_dir": os.path.abspath(args.data_dir), "csv_left_slot": list(spec)})
+    except ValueError as error:
+        parser.error(f"--out-dir: {error}")
 
-    experiments = [(n, e) for n, e in EXPERIMENTS if not args.only or n == "baseline" or n in args.only]
+    experiments = chosen_experiments(args.only)
     failed, model_rows, baseline_rows = [], {}, {}
 
     if not args.skip_baselines:

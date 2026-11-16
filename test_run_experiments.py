@@ -3,9 +3,13 @@ Tests for run_experiments.py's comparison table. The table is what decides
 which options are kept, so a wrong sign or a hidden missing class would steer
 the retraining the wrong way.
 """
+import json
+import os
+import sys
+import tempfile
 import unittest
 
-from run_experiments import EXPERIMENTS, results_table
+from run_experiments import COMPARED_WITH, EXPERIMENTS, chosen_experiments, claim_out_dir, results_table, run
 
 
 def _metrics(acc, f1, up=None):
@@ -35,11 +39,66 @@ class TestResultsTable(unittest.TestCase):
     def test_baselines_are_listed_for_comparison(self):
         self.assertIn("(majority)", self.rows)
 
-    def test_every_option_row_changes_one_thing_from_the_default(self):
-        names = [name for name, _ in EXPERIMENTS]
-        self.assertEqual(names[0], "baseline")
-        self.assertEqual(EXPERIMENTS[0][1], [])
-        self.assertEqual(len(names), len(set(names)))
+    def test_every_row_differs_by_one_option_from_the_row_it_is_compared_with(self):
+        # A row that changes two things gives a difference nobody can assign
+        # to either: class weights also select the epoch by macro-F1, which
+        # raises macro-F1 by itself, so they are compared with a row that
+        # only does that.
+        arguments = dict(EXPERIMENTS)
+        self.assertEqual(len(arguments), len(EXPERIMENTS))
+        self.assertEqual(arguments["baseline"], [])
+        for name, extra in EXPERIMENTS[1:]:
+            reference = arguments[COMPARED_WITH.get(name, "baseline")]
+            self.assertEqual(extra[len(extra) - len(reference):], reference, name)
+            added = [a for a in extra[:len(extra) - len(reference)] if a.startswith("--")]
+            self.assertEqual(len(added), 1, f"{name} adds {added}")
+
+    def test_class_weights_are_measured_against_macro_f1_selection(self):
+        table = results_table(
+            {"baseline": [_metrics(0.80, 0.50)], "select_macro_f1": [_metrics(0.78, 0.58)],
+             "class_weights": [_metrics(0.77, 0.60)]}, {})
+        row = next(line for line in table.splitlines() if line.startswith("| class_weights"))
+        self.assertIn("+0.020 vs select_macro_f1", row)  # not +0.100, most of which the selection gives
+        self.assertNotIn("+0.100", row)
+
+    def test_asking_for_one_row_also_runs_the_row_it_is_compared_with(self):
+        # Otherwise its change column has nothing to be measured against.
+        self.assertEqual([name for name, _ in chosen_experiments(["class_weights"])],
+                         ["baseline", "select_macro_f1", "class_weights"])
+        self.assertEqual(chosen_experiments(None), EXPERIMENTS)
+
+
+class TestRuns(unittest.TestCase):
+    def test_runs_start_in_the_callers_folder(self):
+        # --data-dir data must mean the same folder to train.py as to the
+        # person who typed it; started in the project folder instead, every
+        # video was skipped as missing.
+        here = os.getcwd()
+        with tempfile.TemporaryDirectory() as folder:
+            try:
+                os.chdir(folder)
+                self.assertTrue(run([sys.executable, "-c", "import os; print(os.getcwd())"], "run.log"))
+                with open("run.log", encoding="utf-8") as log:
+                    self.assertEqual(os.path.realpath(log.read().strip()), os.path.realpath(folder))
+            finally:
+                os.chdir(here)
+
+    def test_an_output_folder_is_not_reused_for_other_settings(self):
+        # Finished runs are skipped, so after a change of --csv-left-slot the
+        # table would show the old models under the new value.
+        settings = {"data_dir": "/data", "csv_left_slot": ["right", {"Down": "left"}]}
+        with tempfile.TemporaryDirectory() as folder:
+            out = os.path.join(folder, "experiments")
+            claim_out_dir(out, settings)
+            claim_out_dir(out, json.loads(json.dumps(settings)))  # the same command again: resumes
+            with self.assertRaises(ValueError):
+                claim_out_dir(out, {**settings, "csv_left_slot": ["right", {}]})
+
+    def test_results_with_no_record_of_their_settings_are_not_trusted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            open(os.path.join(folder, "baseline_seed0.pt"), "w").close()
+            with self.assertRaises(ValueError):
+                claim_out_dir(folder, {"data_dir": "/data", "csv_left_slot": ["left", {}]})
 
 
 if __name__ == "__main__":

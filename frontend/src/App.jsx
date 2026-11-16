@@ -158,9 +158,17 @@ function Results({data, innerRef}) {
       <Heading level={2}>結果</Heading>
       {HANDS.map(([hand, handName]) => {
         const rate = data.detection_rate?.[hand];
-        return rate !== undefined && rate < LOW_DETECTION ? (
-          <Banner key={hand} status="warning" collapsible={false} title={`${handName}只在 ${Math.round(rate * 100)}% 的畫面中被偵測到`}
-            description="次數可能不準。請照「拍攝要點」重拍。" />
+        // Seconds in which this hand's strokes were not counted because it went undetected (inference.analyze).
+        const uncounted = data.uncounted_seconds?.[hand] || 0;
+        if (rate !== undefined && rate < LOW_DETECTION) {
+          return (
+            <Banner key={hand} status="warning" collapsible={false} title={`${handName}只在 ${Math.round(rate * 100)}% 的畫面中被偵測到`}
+              description="次數可能不準。請照「拍攝要點」重拍。" />
+          );
+        }
+        return uncounted > 0 ? (
+          <Banner key={hand} status="info" isDismissable title={`${handName}有 ${uncounted.toFixed(1)} 秒沒有計數`}
+            description="這隻手有一段時間沒被偵測到，那幾段時間裡的揮擊不在次數裡。" />
         ) : null;
       })}
       {HANDS.map(([hand, handName]) => <HandCounts key={hand} data={data} hand={hand} handName={handName} />)}

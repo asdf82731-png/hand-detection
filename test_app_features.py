@@ -459,6 +459,31 @@ class TestLongGaps(unittest.TestCase):
         self.assertEqual(len(stroke_spans(run + [GAP_LABEL] * MIN_RUN_WINDOWS + run)), 2)
         self.assertEqual(len(stroke_spans([GAP_LABEL] * 10)), 0)
 
+    def test_the_time_left_uncounted_is_reported(self):
+        # One 7-frame miss discards every window that touches it: 1.2 s in
+        # which strokes are played but not counted. Reported, a lower count
+        # can be told apart from fewer strokes played. A hand never seen
+        # leaves every window uncounted.
+        import inference
+        frames = 300
+        detected = {"left": np.ones(frames, dtype=bool), "right": np.zeros(frames, dtype=bool)}
+        detected["left"][100:107] = False
+        positions = {hand: np.zeros((frames, 21, 3), dtype=np.float32) for hand in detected}
+        states = {hand: np.zeros((frames, 2), dtype=np.float32) for hand in detected}
+        rates = {hand: float(flags.mean()) for hand, flags in detected.items()}
+        fakes = {"extract_hand_tracks": lambda *a: (positions, states, rates, detected),
+                 "video_fps": lambda source: 30.0, "source_frame_count": lambda source: frames,
+                 "predict_window_labels": lambda positions, *a: [NONE] * (len(positions) - WINDOW_SIZE + 1)}
+        originals = {name: getattr(inference, name) for name in fakes}
+        try:
+            for name, fake in fakes.items():
+                setattr(inference, name, fake)
+            result = inference.analyze("unused", None, None, {"left": "left", "right": "right"}, None)
+        finally:
+            for name, original in originals.items():
+                setattr(inference, name, original)
+        self.assertEqual(result["uncounted_seconds"], {"left": 1.2, "right": round((frames - WINDOW_SIZE + 1) / 30, 2)})
+
     def test_gap_windows_line_up_with_the_predicted_windows(self):
         # One flag per window as predict_window_labels makes them, also when a
         # 60fps upload is resampled to 30fps.
@@ -493,13 +518,14 @@ class TestFeatureOptions(unittest.TestCase):
         self.assertFalse(backward[0, :, 3:].any())   # padding moved to the start
 
     def test_palm_scale_makes_camera_distance_irrelevant(self):
-        # F4: a hand twice as close is twice as big in pixels; in palm lengths
-        # it is the same hand.
+        # F4: a hand twice as close is twice as big in pixels, in depth too;
+        # in palm lengths it is the same hand. With z left out, a third of the
+        # channels (z and its velocity and acceleration) still told the model
+        # how far the camera was.
         import features
         rng = np.random.default_rng(4)
         near = rng.uniform(100, 300, size=(10, 21, 3)).astype(np.float32)
-        near[..., 2] = 0.0
-        far = near * np.array([0.5, 0.5, 1.0], dtype=np.float32)
+        far = near * 0.5
         results = []
         original = features.extract_raw_tracks
         try:
@@ -510,6 +536,24 @@ class TestFeatureOptions(unittest.TestCase):
         finally:
             features.extract_raw_tracks = original
         np.testing.assert_allclose(results[0], results[1], atol=1e-4)
+
+    def test_depth_is_put_on_the_scale_of_x_only_on_request(self):
+        # MediaPipe reports z as a fraction of the image width, so palm_scale
+        # needs it in pixels like x before dividing by the palm length (a real
+        # photo shrunk to half size gave z 0.57x, x 0.52x). Without the option
+        # z must stay as reported: existing checkpoints were trained on that.
+        from types import SimpleNamespace
+        from features import detect_hand_coords
+
+        class Tracker:
+            def process(self, image_rgb):
+                return ["Left"], [0.9], [[SimpleNamespace(x=0.5, y=0.5, z=0.01 * i) for i in range(21)]]
+
+        image = np.zeros((1080, 1920, 3), dtype=np.uint8)  # 1280x720 in reference pixels
+        reported = np.array([0.01 * i for i in range(21)], dtype=np.float32)
+        np.testing.assert_allclose(detect_hand_coords(image, Tracker())["left"][:, 2], reported, atol=1e-6)
+        np.testing.assert_allclose(detect_hand_coords(image, Tracker(), z_pixels=True)["left"][:, 2], reported * 1280,
+                                   rtol=1e-5)
 
     def test_mirrored_right_hand_looks_like_a_left_hand(self):
         # F5: the same stroke played by the right hand, seen in a mirror, must

@@ -19,7 +19,6 @@ from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, 
 # (reference_size), so the same motion gives the same numbers for a 720p and a
 # 1080p upload, and a portrait upload is measured in a 720x1280 frame instead
 # of being squashed into 1280x720.
-REFERENCE_WIDTH = 1280
 REFERENCE_HEIGHT = 720
 
 HANDS = ("left", "right")
@@ -32,22 +31,25 @@ def reference_size(width, height):
     return width * scale, height * scale
 
 
-def detect_hand_coords(image, hands):
+def detect_hand_coords(image, hands, z_pixels=False):
     """
     One frame -> {"left": (21, 3) or None, "right": (21, 3) or None}, keyed by
     MediaPipe's handedness slot. x/y in reference pixels (reference_size), z
     as MediaPipe reports it. `hands` is a tracker from pipeline.create_hand_tracker().
+    MediaPipe gives z on roughly the scale of x, as a fraction of the image
+    width; z_pixels puts it in reference pixels like x.
     """
     labels, scores, hands_landmarks = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     coords = {"left": None, "right": None}
     if hands_landmarks:
         width, height = reference_size(image.shape[1], image.shape[0])
+        depth = width if z_pixels else 1.0
         slots = _assign_hand_slots(labels, scores, [np.mean([lm.x for lm in hl]) for hl in hands_landmarks])
         for hand_landmarks, slot in zip(hands_landmarks, slots):
             if slot is None:
                 continue
             coords[_SLOT_TO_HAND[slot]] = np.array(
-                [[lm.x * width, lm.y * height, lm.z] for lm in hand_landmarks],
+                [[lm.x * width, lm.y * height, lm.z * depth] for lm in hand_landmarks],
                 dtype=np.float32,
             )
     return coords
@@ -163,11 +165,12 @@ def match_elbow(hand_coords, arms, frame_size):
     return best
 
 
-def extract_raw_tracks(source, on_frame=None, with_pose=False):
+def extract_raw_tracks(source, on_frame=None, with_pose=False, z_pixels=False):
     """
     Video file or frame-image directory -> (hands, elbows):
     hands {"left": (N, 21, 3), "right": ...} in reference-frame pixels, NaN
-    where the hand was not detected; elbows {"left": (N, 2), ...} likewise,
+    where the hand was not detected (z as in detect_hand_coords); elbows
+    {"left": (N, 2), ...} likewise,
     all NaN unless with_pose (the body model makes extraction several times
     slower: about 4x in one CPU test, including model loading).
     N is the highest frame index + 1. on_frame(frames_done) is called after
@@ -183,7 +186,7 @@ def extract_raw_tracks(source, on_frame=None, with_pose=False):
                 last_index = index
                 if on_frame is not None:
                     on_frame(done)
-                coords = detect_hand_coords(image, tracker)
+                coords = detect_hand_coords(image, tracker, z_pixels)
                 arms = pose.arms(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)) if pose else []
                 frame_size = reference_size(image.shape[1], image.shape[0])
                 for hand in HANDS:
@@ -239,15 +242,16 @@ def extract_hand_tracks(source, on_frame=None, with_pose=False, palm_scale=False
     which frames the hand was really detected in: returns (positions,
     hand_states {"left": (N, 2), ...}, detection rates, detected {"left": (N,) bool, ...}).
     with_pose measures the wrist angle against the forearm (see hand_state).
-    palm_scale divides the positions' x and y by the hand's median palm length
-    in the video, so a hand twice as far from the camera gives the same
-    numbers (flow report F4); z is MediaPipe's own unit and is left as is.
+    palm_scale divides the positions by the hand's median palm length in the
+    video, so a hand twice as far from the camera gives the same numbers (flow
+    report F4). z shrinks with the hand like x and y do, so it is put in
+    pixels first (detect_hand_coords z_pixels) and divided the same way.
     """
-    raw, elbows = extract_raw_tracks(source, on_frame, with_pose)
+    raw, elbows = extract_raw_tracks(source, on_frame, with_pose, palm_scale)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
     if palm_scale:
         for hand, coords in raw.items():
-            positions[hand][..., :2] /= palm_length(coords)
+            positions[hand] /= palm_length(coords)
     states = {hand: hand_state(coords, elbows[hand] if with_pose else None) for hand, coords in raw.items()}
     detected = {hand: ~np.isnan(coords).any(axis=(1, 2)) for hand, coords in raw.items()}
     return positions, states, detection_rates(raw), detected
