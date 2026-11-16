@@ -116,7 +116,7 @@ def load_split_windows(data_dir, csv_hand_to_slot, time_stretch=False, pose_angl
         if not (os.path.exists(source) and os.path.exists(csv_path)):
             print(f"[SKIPPED] {name}: need {csv_path} and either a {name}/ frame folder or {name}.mp4 in {data_dir}")
             continue
-        positions, states, detection_rate = extract_hand_tracks(source, with_pose=pose_angle)
+        positions, states, detection_rate, _ = extract_hand_tracks(source, with_pose=pose_angle)
         num_frames = len(positions["left"])
         frame_labels = load_frame_labels(csv_path)
         if max(frame_labels) >= num_frames:

@@ -229,20 +229,41 @@ def extract_hand_positions(source, on_frame=None):
     ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates). Positions
     are interpolated and wrist-relative, ready for window_features().
     """
-    positions, _, rates = extract_hand_tracks(source, on_frame)
+    positions, _, rates, _ = extract_hand_tracks(source, on_frame)
     return positions, rates
 
 
 def extract_hand_tracks(source, on_frame=None, with_pose=False):
     """
-    Like extract_hand_positions, plus each hand's wrist height and angle:
-    returns (positions, hand_states {"left": (N, 2), "right": (N, 2)}, detection rates).
+    Like extract_hand_positions, plus each hand's wrist height and angle and
+    which frames the hand was really detected in: returns (positions,
+    hand_states {"left": (N, 2), ...}, detection rates, detected {"left": (N,) bool, ...}).
     with_pose measures the wrist angle against the forearm (see hand_state).
     """
     raw, elbows = extract_raw_tracks(source, on_frame, with_pose)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
     states = {hand: hand_state(coords, elbows[hand] if with_pose else None) for hand, coords in raw.items()}
-    return positions, states, detection_rates(raw)
+    detected = {hand: ~np.isnan(coords).any(axis=(1, 2)) for hand, coords in raw.items()}
+    return positions, states, detection_rates(raw), detected
+
+
+def long_gaps(detected, max_frames):
+    """
+    (N,) detected flags -> (N,) bool, True inside every run of undetected
+    frames longer than max_frames. fill_missing bridges any gap; over a long
+    one the "motion" it produces is made up (flow report H2).
+    """
+    detected = np.asarray(detected, dtype=bool)
+    gaps = np.zeros(len(detected), dtype=bool)
+    start = None
+    for i, seen in enumerate(np.append(detected, True)):
+        if not seen and start is None:
+            start = i
+        elif seen and start is not None:
+            if i - start > max_frames:
+                gaps[start:i] = True
+            start = None
+    return gaps
 
 
 WRIST, MIDDLE_MCP = 0, 9

@@ -436,3 +436,40 @@ class TestServiceLimits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLongGaps(unittest.TestCase):
+    # Flow report H2: fill_missing bridges any gap, so a hand that leaves the
+    # frame for seconds still shows smooth "motion" that can be counted.
+
+    def test_only_gaps_longer_than_the_cap_are_marked(self):
+        from features import long_gaps
+        detected = np.array([1, 0, 0, 1, 0, 0, 0, 0, 1], dtype=bool)
+        np.testing.assert_array_equal(long_gaps(detected, 3), [0, 0, 0, 0, 1, 1, 1, 1, 0])
+
+    def test_frames_before_the_first_detection_count_as_a_gap(self):
+        # They are filled with zeros, not with anything the hand did.
+        from features import long_gaps
+        np.testing.assert_array_equal(long_gaps(np.array([0, 0, 0, 1], dtype=bool), 2), [1, 1, 1, 0])
+
+    def test_a_gap_separates_two_strokes_of_the_same_kind(self):
+        # Without it, two strokes on either side of a blind spot merge into one.
+        from inference import GAP_LABEL, MIN_RUN_WINDOWS, stroke_spans
+        run = [0] * MIN_RUN_WINDOWS
+        self.assertEqual(len(stroke_spans(run + [GAP_LABEL] * MIN_RUN_WINDOWS + run)), 2)
+        self.assertEqual(len(stroke_spans([GAP_LABEL] * 10)), 0)
+
+    def test_gap_windows_line_up_with_the_predicted_windows(self):
+        # One flag per window as predict_window_labels makes them, also when a
+        # 60fps upload is resampled to 30fps.
+        from inference import WINDOW_SIZE, gap_windows
+        detected = np.ones(120, dtype=bool)
+        detected[50:70] = False  # 20 frames: past the cap at both rates
+        at_30 = gap_windows(detected, 30.0)
+        self.assertEqual(len(at_30), 120 - WINDOW_SIZE + 1)
+        self.assertTrue(at_30[50] and not at_30[0] and not at_30[-1])
+        detected_60 = np.ones(240, dtype=bool)
+        detected_60[50:70] = False  # 0.33 s, frames 25-35 after resampling
+        at_60 = gap_windows(detected_60, 60.0)
+        self.assertEqual(len(at_60), 120 - WINDOW_SIZE + 1)  # 4 s at 30fps
+        self.assertTrue(at_60[30] and not at_60[36] and not at_60[-1])  # window i covers frames i to i+29

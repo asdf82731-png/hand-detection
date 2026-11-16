@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from features import (
-    FeatureScaler, extract_hand_tracks, pack_model_input, resample_to_fps, source_frame_count, video_fps,
+    FeatureScaler, extract_hand_tracks, long_gaps, pack_model_input, resample_to_fps, source_frame_count, video_fps,
     window_features, window_state_features,
 )
 from model import StrokeBiLSTMModel
@@ -30,6 +30,12 @@ NUM_STROKES = 4
 # With one prediction per frame, a label that lasts fewer windows than this is
 # treated as flicker and ignored. Untuned: revisit once a real checkpoint exists.
 MIN_RUN_WINDOWS = 3
+
+# Undetected gaps longer than this are not interpolated over for counting:
+# windows that touch one get GAP_LABEL, which is never counted and separates
+# strokes (flow report H2). 0.2 s is a first guess, not tuned.
+MAX_FILL_SECONDS = 0.2
+GAP_LABEL = -1
 
 
 def load_checkpoint(path, device):
@@ -102,7 +108,7 @@ def stroke_spans(window_labels):
     for label, first, last in runs:
         if last - first + 1 < MIN_RUN_WINDOWS:
             continue
-        if label < NUM_STROKES:
+        if 0 <= label < NUM_STROKES:
             if label != previous:
                 spans.append([label, first + offset, last + offset])
             else:
@@ -160,6 +166,17 @@ def stroke_metrics(spans, states, fps=TRAIN_FPS):
     return {"strokes": strokes, "interval_s_mean": interval_mean, "interval_s_cv": interval_cv}
 
 
+def gap_windows(detected, fps):
+    """
+    One hand's detected flags at the source frame rate -> for every window at
+    TRAIN_FPS (as predict_window_labels makes them), whether it touches an
+    undetected gap longer than MAX_FILL_SECONDS.
+    """
+    gaps = long_gaps(detected, round(MAX_FILL_SECONDS * (fps or TRAIN_FPS))).astype(np.float32)[:, None, None]
+    gaps = to_training_fps({"gaps": gaps}, fps)["gaps"][:, 0, 0] > 0  # any overlap with a gap counts
+    return [bool(gaps[s:s + WINDOW_SIZE].any()) for s in range(len(gaps) - WINDOW_SIZE + 1)]
+
+
 def to_training_fps(positions, fps):
     """Resample each hand's positions to TRAIN_FPS unless fps is unknown or already within FPS_TOLERANCE of it."""
     if fps is None or abs(fps - TRAIN_FPS) / TRAIN_FPS <= FPS_TOLERANCE:
@@ -187,7 +204,8 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         if total:
             report(DETECTION_SHARE * min(done / total, 1.0))
 
-    positions, states, detection_rate = extract_hand_tracks(source, on_frame, getattr(model, "pose_angle", False))
+    positions, states, detection_rate, detected = extract_hand_tracks(
+        source, on_frame, getattr(model, "pose_angle", False))
     fps = video_fps(source)
     resampled = to_training_fps(positions, fps)
     frame_scale = 1.0
@@ -204,7 +222,9 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         if detection_rate[slot] == 0:
             spans = []  # hand never seen: nothing to classify
         else:
-            spans = stroke_spans(predict_window_labels(positions[slot], slot, model, scaler, device, states[slot]))
+            labels = predict_window_labels(positions[slot], slot, model, scaler, device, states[slot])
+            labels = [GAP_LABEL if gap else label for label, gap in zip(labels, gap_windows(detected[slot], fps))]
+            spans = stroke_spans(labels)
         result["events"][hand] = [label for label, _, _ in spans]
         result["spans"][hand] = spans
         result["metrics"][hand] = stroke_metrics(spans, states[slot])
