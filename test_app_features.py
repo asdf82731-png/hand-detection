@@ -66,7 +66,65 @@ class TestOldCheckpoint(unittest.TestCase):
         # options existed.
         model, scaler, _ = load_checkpoint("multi_motion_model_7class.pt", torch.device("cpu"))
         self.assertEqual((model.embedding, model.state_dim), ("cumulative", 0))
+        self.assertEqual((model.lstm_input, model.bidir_ends, model.output_gelu), (None, False, True))
         self.assertIsNone(scaler.state_mean)
+
+
+class TestArchitectureFixes(unittest.TestCase):
+    # Flow report M1-M3 (REV-8). Off by default so old checkpoints still load.
+
+    def test_projection_shrinks_the_lstms(self):
+        # M1: the LSTMs held 99.8% of 4.3M parameters for a few thousand
+        # overlapping windows; projecting first must cut that sharply.
+        from model import StrokeBiLSTMModel
+        count = lambda m: sum(p.numel() for p in m.parameters())
+        original, compact = StrokeBiLSTMModel(7), StrokeBiLSTMModel(7, state_dim=6, lstm_input=128)
+        self.assertLess(count(compact), count(original) / 4)
+        out = compact.eval()(torch.randn(2, 30, 62, 9), torch.randn(2, 30, 6))
+        self.assertEqual(out.shape, (2, 7))
+
+    def test_bidir_ends_lets_the_backward_direction_see_the_whole_window(self):
+        # M2: read at the last step, the backward LSTM has seen only the last
+        # frame, so earlier frames cannot change that half of the summary.
+        from model import StrokeBiLSTMModel
+        torch.manual_seed(0)
+        lstm = torch.nn.LSTM(8, 128, batch_first=True, bidirectional=True)
+        x = torch.randn(1, 30, 8)
+        y = x.clone()
+        y[:, :-1] += 1.0  # change every frame but the last
+        for bidir_ends, should_change in ((False, False), (True, True)):
+            model = StrokeBiLSTMModel(7, bidir_ends=bidir_ends)
+            backward = [model._summary(lstm(v)[0])[:, 128:] for v in (x, y)]
+            self.assertEqual(not torch.allclose(*backward), should_change, f"bidir_ends={bidir_ends}")
+
+    def test_without_output_gelu_wrong_classes_can_be_scored_low(self):
+        # M3: GELU floors every score at about -0.17.
+        from model import StrokeBiLSTMModel
+        x = torch.randn(2, 30, 62, 9)
+        for output_gelu in (True, False):
+            model = StrokeBiLSTMModel(7, output_gelu=output_gelu).eval()
+            with torch.no_grad():
+                model.fc.bias.fill_(-5.0)
+                model.fc.weight.zero_()
+                lowest = float(model(x).min())
+            if output_gelu:
+                self.assertGreater(lowest, -0.2)
+            else:
+                self.assertAlmostEqual(lowest, -5.0, places=4)
+
+    def test_checkpoint_rebuilds_the_architecture_it_was_trained_with(self):
+        import os, tempfile
+        from features import FeatureScaler
+        from model import StrokeBiLSTMModel
+        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False}
+        model = StrokeBiLSTMModel(7, **config)
+        scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "m.pt")
+            torch.save({"model_state": model.state_dict(), "scaler": scaler.state_dict(), "labels": list(range(7)),
+                        "hand_to_slot": {"left": "left", "right": "right"}, "config": config}, path)
+            loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
+        self.assertEqual((loaded.lstm_input, loaded.bidir_ends, loaded.output_gelu), (128, True, False))
 
 
 def _raw_hand(wrist_y, palm=(0.0, -50.0), scale=1.0):
@@ -286,19 +344,23 @@ class TestForearmWristAngle(unittest.TestCase):
 
 class TestElbowMatching(unittest.TestCase):
     def test_the_arm_whose_wrist_is_nearest_the_hand_is_taken(self):
-        from features import REFERENCE_HEIGHT, REFERENCE_WIDTH, match_elbow
+        # In a portrait frame too: the pose model's normalized coordinates must
+        # be scaled like the hand's, or the elbow lands off the arm.
+        from features import match_elbow
         coords, _ = _hand_with_arm(0.0, 0.0, frames=1)
         hand = coords[0]
-        near_wrist = (hand[0, 0] / REFERENCE_WIDTH + 0.005, hand[0, 1] / REFERENCE_HEIGHT)
-        far_wrist = (0.1, 0.1)
-        elbow = match_elbow(hand, [((0.2, 0.2), far_wrist), ((0.5, 0.9), near_wrist)])
-        np.testing.assert_allclose(elbow, [0.5 * REFERENCE_WIDTH, 0.9 * REFERENCE_HEIGHT], atol=1e-3)
+        for width, height in ((1280, 720), (720, 1280)):
+            with self.subTest(frame=(width, height)):
+                near_wrist = (hand[0, 0] / width + 0.005, hand[0, 1] / height)
+                far_wrist = (0.1, 0.1)
+                elbow = match_elbow(hand, [((0.2, 0.2), far_wrist), ((0.5, 0.9), near_wrist)], (width, height))
+                np.testing.assert_allclose(elbow, [0.5 * width, 0.9 * height], atol=1e-3)
 
     def test_an_arm_too_far_from_the_hand_is_not_used(self):
         # The other person's arm, or the other arm, must not be paired.
         from features import match_elbow
         coords, _ = _hand_with_arm(0.0, 0.0, frames=1)
-        self.assertIsNone(match_elbow(coords[0], [((0.0, 0.0), (0.05, 0.05))]))
+        self.assertIsNone(match_elbow(coords[0], [((0.0, 0.0), (0.05, 0.05))], (1280, 720)))
 
 
 class TestTrainingHelpers(unittest.TestCase):
@@ -374,3 +436,120 @@ class TestServiceLimits(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLongGaps(unittest.TestCase):
+    # Flow report H2: fill_missing bridges any gap, so a hand that leaves the
+    # frame for seconds still shows smooth "motion" that can be counted.
+
+    def test_only_gaps_longer_than_the_cap_are_marked(self):
+        from features import long_gaps
+        detected = np.array([1, 0, 0, 1, 0, 0, 0, 0, 1], dtype=bool)
+        np.testing.assert_array_equal(long_gaps(detected, 3), [0, 0, 0, 0, 1, 1, 1, 1, 0])
+
+    def test_frames_before_the_first_detection_count_as_a_gap(self):
+        # They are filled with zeros, not with anything the hand did.
+        from features import long_gaps
+        np.testing.assert_array_equal(long_gaps(np.array([0, 0, 0, 1], dtype=bool), 2), [1, 1, 1, 0])
+
+    def test_a_gap_separates_two_strokes_of_the_same_kind(self):
+        # Without it, two strokes on either side of a blind spot merge into one.
+        from inference import GAP_LABEL, MIN_RUN_WINDOWS, stroke_spans
+        run = [0] * MIN_RUN_WINDOWS
+        self.assertEqual(len(stroke_spans(run + [GAP_LABEL] * MIN_RUN_WINDOWS + run)), 2)
+        self.assertEqual(len(stroke_spans([GAP_LABEL] * 10)), 0)
+
+    def test_gap_windows_line_up_with_the_predicted_windows(self):
+        # One flag per window as predict_window_labels makes them, also when a
+        # 60fps upload is resampled to 30fps.
+        from inference import WINDOW_SIZE, gap_windows
+        detected = np.ones(120, dtype=bool)
+        detected[50:70] = False  # 20 frames: past the cap at both rates
+        at_30 = gap_windows(detected, 30.0)
+        self.assertEqual(len(at_30), 120 - WINDOW_SIZE + 1)
+        self.assertTrue(at_30[50] and not at_30[0] and not at_30[-1])
+        detected_60 = np.ones(240, dtype=bool)
+        detected_60[50:70] = False  # 0.33 s, frames 25-35 after resampling
+        at_60 = gap_windows(detected_60, 60.0)
+        self.assertEqual(len(at_60), 120 - WINDOW_SIZE + 1)  # 4 s at 30fps
+        self.assertTrue(at_60[30] and not at_60[36] and not at_60[-1])  # window i covers frames i to i+29
+
+
+class TestFeatureOptions(unittest.TestCase):
+    # Flow report F2, F4, F5: training options, off by default, applied the
+    # same way at inference through features.window_inputs.
+
+    def test_backward_differences_give_the_last_frame_its_motion(self):
+        # F2: a window is labeled by its last frame and the LSTM output is read
+        # there, yet the thesis layout leaves that frame's velocity at 0.
+        from features import window_features
+        positions = np.zeros((6, 21, 3), dtype=np.float32)
+        positions[:, 8, 0] = np.arange(6) ** 2
+        forward, _ = window_features(positions)
+        backward, _ = window_features(positions, backward=True)
+        self.assertEqual(forward[-1, 8, 3], 0.0)
+        self.assertEqual(backward[-1, 8, 3], 9.0)    # 25 - 16
+        self.assertEqual(backward[-1, 8, 6], 2.0)
+        self.assertFalse(backward[0, :, 3:].any())   # padding moved to the start
+
+    def test_palm_scale_makes_camera_distance_irrelevant(self):
+        # F4: a hand twice as close is twice as big in pixels; in palm lengths
+        # it is the same hand.
+        import features
+        rng = np.random.default_rng(4)
+        near = rng.uniform(100, 300, size=(10, 21, 3)).astype(np.float32)
+        near[..., 2] = 0.0
+        far = near * np.array([0.5, 0.5, 1.0], dtype=np.float32)
+        results = []
+        original = features.extract_raw_tracks
+        try:
+            for raw in (near, far):
+                features.extract_raw_tracks = lambda *a, raw=raw: ({"left": raw, "right": raw},
+                                                                   {h: np.full((10, 2), np.nan) for h in ("left", "right")})
+                results.append(features.extract_hand_tracks("unused", palm_scale=True)[0]["left"])
+        finally:
+            features.extract_raw_tracks = original
+        np.testing.assert_allclose(results[0], results[1], atol=1e-4)
+
+    def test_mirrored_right_hand_looks_like_a_left_hand(self):
+        # F5: the same stroke played by the right hand, seen in a mirror, must
+        # reach the model exactly as the left hand's does, in the same slot.
+        from features import window_inputs
+        rng = np.random.default_rng(5)
+        left = rng.normal(size=(30, 21, 3)).astype(np.float32)
+        right = left * np.array([-1.0, 1.0, 1.0], dtype=np.float32)
+        left_states = rng.normal(size=(30, 2)).astype(np.float32)
+        right_states = left_states * np.array([1.0, -1.0], dtype=np.float32)  # the wrist angle flips too
+        a = window_inputs(left, left_states, "left", mirror_hands=True)
+        b = window_inputs(right, right_states, "right", mirror_hands=True)
+        self.assertEqual((a[3], b[3]), ("left", "left"))
+        for x, y in zip(a[:3], b[:3]):
+            np.testing.assert_allclose(x, y, atol=1e-5)
+        self.assertEqual(window_inputs(right, right_states, "right")[3], "right")  # off by default
+
+    def test_checkpoint_applies_the_feature_options_it_was_trained_with(self):
+        import os, tempfile
+        from features import FeatureScaler
+        from model import StrokeBiLSTMModel
+        config = {"backward_diff": True, "palm_scale": True, "mirror_hands": True}
+        scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "m.pt")
+            torch.save({"model_state": StrokeBiLSTMModel(7).state_dict(), "scaler": scaler.state_dict(),
+                        "labels": list(range(7)), "hand_to_slot": {"left": "left", "right": "right"},
+                        "config": config}, path)
+            loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
+        self.assertEqual((loaded.backward_diff, loaded.palm_scale, loaded.mirror_hands), (True, True, True))
+        old, _, _ = load_checkpoint("multi_motion_model_7class.pt", torch.device("cpu"))
+        self.assertEqual((old.backward_diff, old.palm_scale, old.mirror_hands), (False, False, False))
+
+
+class TestStrokeTimes(unittest.TestCase):
+    def test_spans_become_seconds_from_the_start(self):
+        # Flow report I1: counts alone cannot be drawn on a timeline or
+        # checked against the video.
+        from inference import stroke_times
+        times = stroke_times([(0, 30, 44), (2, 90, 104)], 30.0)
+        self.assertEqual(times[0], {"stroke": "Full", "start_s": 1.0, "end_s": 1.5})
+        self.assertEqual(times[1]["stroke"], "Up")
+        self.assertEqual(stroke_times([(1, 60, 74)], 60.0)[0]["start_s"], 1.0)  # the analysis frame rate decides

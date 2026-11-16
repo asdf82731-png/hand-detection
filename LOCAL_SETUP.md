@@ -87,7 +87,7 @@ python check_data.py --data-dir data
 3. **預覽圖**：
    - 人應該是正的（頭在上、打擊板在下）。如果是顛倒的，先停下來告訴 Claude。
    - 圖上兩個綠框分別標著 `slot left`、`slot right`，下方紅字是這一幀 CSV 的左右手標籤。看 `slot left` 框住的那隻手，在 CSV 裡是 left 還是 right。
-4. **Summary 的 `--csv-left-slot`**：程式依「標成揮擊的幀，手應該動得比較多」推測的建議值。它只是參考，**以預覽圖為準**：`slot left` 框住的手在 CSV 裡叫 left，就用 `left`；叫 right，就用 `right`。
+4. **Summary 的 `--csv-left-slot`**：程式依「標成揮擊的幀，手應該動得比較多」逐支影片推測的建議值。它只是參考，**以每支影片的預覽圖為準**：`slot left` 框住的手在 CSV 裡叫 left，那支影片就是 `left`；叫 right，就是 `right`。如果有影片跟其他支相反，寫成例外，例如 `left,Down=right`。
 
 鏡頭正對鼓手時，畫面左邊的手是鼓手的右手。所以如果 CSV 的 left/right 指的是鼓手自己的左右手，答案通常是 `right`。
 
@@ -96,7 +96,7 @@ python check_data.py --data-dir data
 ## 5. 訓練
 
 ```
-python train.py --data-dir data --csv-left-slot <left 或 right>
+python train.py --data-dir data --csv-left-slot <left 或 right，例外寫成 left,Down=right>
 ```
 
 每個 epoch 印一行 loss 和驗證準確率，結束時印出各類別的 precision / recall / F1、混淆矩陣、AUC-ROC，並存成 `multi_motion_model_7class.pt`（約 17MB）。
@@ -106,6 +106,20 @@ python train.py --data-dir data --csv-left-slot <left 或 right>
 驗證集是每支影片時間軸的最後一段，跟訓練用的片段不重疊，所以數字會比論文的隨機切分低，但比較可信。
 
 App 版的選項（預設都關閉，說明見 `TRAINING_DESIGN.md` 第 8 節）：`--embedding development`（不受速度影響的 Lie group 嵌入）、`--hand-state`（加入手腕高度與夾角）、`--time-stretch`（訓練時加入快慢不同的版本）。建議一次只開一個，和不加選項的結果比較。
+
+### 一次比較所有選項
+
+```
+python run_experiments.py --data-dir data --csv-left-slot <同上> --seeds 0 1 2 3 4
+```
+
+依序訓練「不加選項的基準」和每個選項各一次（每個種子都跑），另外跑 `baselines.py`（多數類別、規則式、GRU）與 `detection_by_label.py`（揮擊／停留各自的偵測率），最後把結果整理成 `experiments/results.md` 的比較表。
+
+- 每次訓練的模型與完整輸出都存在 `experiments/`，**不會覆寫 App 用的 `multi_motion_model_7class.pt`**。要讓 App 改用某個新模型，自己把它複製過去。
+- 每次訓練都要重新偵測手部，一次要幾分鐘；11 組 × 5 個種子要跑很久。中斷後用同一行指令重跑，已完成的會跳過。
+- 只跑一個種子時，兩列的差距可能只是隨機差異；跑多個種子，只相信大於種子間差異（± 後面的數字）的差距。
+- 想先試少一點：`--only hand_state development`（基準一定會跑）。
+- 請把 `experiments/results.md` 貼給 Claude 判讀。
 
 ### 評估次數準不準
 

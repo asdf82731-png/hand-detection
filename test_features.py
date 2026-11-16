@@ -4,15 +4,57 @@ Unit tests for features.py. Each one pins a rule from the thesis method
 silently changing what the model is trained on.
 """
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
-from features import FeatureScaler, fill_missing, pack_model_input, window_features, wrist_relative
+from features import FeatureScaler, detect_hand_coords, fill_missing, pack_model_input, reference_size, window_features, wrist_relative
 from pipeline import BONE_CONNECTIONS
 
 
 def _hand(value):
     return np.full((21, 3), value, dtype=np.float32)
+
+
+# One hand's joints in image pixels, relative to the wrist.
+_HAND_PIXELS = np.random.default_rng(3).uniform(-120, 120, size=(21, 2))
+_HAND_PIXELS[0] = 0.0
+
+
+class _FakeTracker:
+    """Reports _HAND_PIXELS, placed at `wrist`, as MediaPipe would: x / width, y / height."""
+
+    def __init__(self, wrist):
+        self.wrist = wrist
+
+    def process(self, image_rgb):
+        height, width = image_rgb.shape[:2]
+        points = _HAND_PIXELS + self.wrist
+        return ["Right"], [0.9], [[SimpleNamespace(x=x / width, y=y / height, z=0.0) for x, y in points]]
+
+
+def _detected_relative(width, height):
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    coords = detect_hand_coords(image, _FakeTracker(np.array([width / 2, height / 2])))["right"]
+    return coords[:, :2] - coords[0, :2]
+
+
+class TestReferencePixels(unittest.TestCase):
+    def test_landscape_uploads_keep_the_training_scale(self):
+        # The model was trained on 1280x720 videos; 16:9 uploads at any
+        # resolution must keep giving the numbers it was trained on.
+        self.assertEqual(reference_size(1280, 720), (1280, 720))
+        np.testing.assert_allclose(reference_size(1920, 1080), (1280, 720))
+
+    def test_portrait_frame_is_not_squashed(self):
+        # x and y used to be scaled to 1280 and 720 separately, so a 9:16 frame
+        # was stretched sideways and squashed vertically: the palm direction,
+        # the wrist angle and every bone vector came out wrong.
+        np.testing.assert_allclose(_detected_relative(1080, 1920), _HAND_PIXELS * 720 / 1080, atol=1e-3)
+
+    def test_turning_the_phone_does_not_change_the_hand(self):
+        # The same hand, the same size on screen, filmed upright or sideways.
+        np.testing.assert_allclose(_detected_relative(1080, 1920), _detected_relative(1920, 1080), atol=1e-3)
 
 
 class TestFillMissing(unittest.TestCase):

@@ -7,8 +7,8 @@ import numpy as np
 import torch
 
 from features import (
-    FeatureScaler, extract_hand_tracks, pack_model_input, resample_to_fps, source_frame_count, video_fps,
-    window_features, window_state_features,
+    FeatureScaler, extract_hand_tracks, long_gaps, pack_model_input, resample_to_fps, source_frame_count, video_fps,
+    window_inputs,
 )
 from model import StrokeBiLSTMModel
 from pipeline import LABELS
@@ -31,6 +31,12 @@ NUM_STROKES = 4
 # treated as flicker and ignored. Untuned: revisit once a real checkpoint exists.
 MIN_RUN_WINDOWS = 3
 
+# Undetected gaps longer than this are not interpolated over for counting:
+# windows that touch one get GAP_LABEL, which is never counted and separates
+# strokes (flow report H2). 0.2 s is a first guess, not tuned.
+MAX_FILL_SECONDS = 0.2
+GAP_LABEL = -1
+
 
 def load_checkpoint(path, device):
     """
@@ -44,12 +50,20 @@ def load_checkpoint(path, device):
         num_classes=len(checkpoint["labels"]),
         embedding=config.get("embedding", "cumulative"),
         state_dim=config.get("state_dim", 0),
+        lstm_input=config.get("lstm_input"),
+        bidir_ends=config.get("bidir_ends", False),
+        output_gelu=config.get("output_gelu", True),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
     # Whether the hand-state wrist angle was measured against the forearm;
     # inference must measure it the same way.
     model.pose_angle = bool(config.get("pose_angle", False))
+    # Feature options (features.window_inputs / extract_hand_tracks), applied
+    # exactly as in training.
+    model.backward_diff = bool(config.get("backward_diff", False))
+    model.palm_scale = bool(config.get("palm_scale", False))
+    model.mirror_hands = bool(config.get("mirror_hands", False))
     return model, FeatureScaler.from_state_dict(checkpoint["scaler"]), checkpoint["hand_to_slot"]
 
 
@@ -61,18 +75,22 @@ def predict_window_labels(positions, slot, model, scaler, device, states=None):
     hand-state features. Windows are built one batch at a time, so a long
     video does not need all of them in memory at once.
     """
+    if states is None:  # only read when the model uses hand-state features
+        states = np.zeros((len(positions), 2), dtype=np.float32)
     starts = range(len(positions) - WINDOW_SIZE + 1)
     labels = []
     for i in range(0, len(starts), BATCH_SIZE):
         batch = starts[i:i + BATCH_SIZE]
-        inputs = np.stack([
-            pack_model_input(*scaler.transform(*window_features(positions[s:s + WINDOW_SIZE])), slot) for s in batch
-        ])
+        windows = [
+            window_inputs(positions[s:s + WINDOW_SIZE], states[s:s + WINDOW_SIZE], slot,
+                          getattr(model, "backward_diff", False), getattr(model, "mirror_hands", False))
+            for s in batch
+        ]
+        inputs = np.stack([pack_model_input(*scaler.transform(joints, bones), packed_slot)
+                           for joints, bones, _, packed_slot in windows])
         args = [torch.from_numpy(inputs).to(device)]
         if model.state_dim:
-            state_inputs = np.stack([
-                scaler.transform_state(window_state_features(states[s:s + WINDOW_SIZE])) for s in batch
-            ]).astype(np.float32)
+            state_inputs = np.stack([scaler.transform_state(state) for _, _, state, _ in windows]).astype(np.float32)
             args.append(torch.from_numpy(state_inputs).to(device))
         labels.extend(model(*args).argmax(dim=1).tolist())
     return labels
@@ -99,7 +117,7 @@ def stroke_spans(window_labels):
     for label, first, last in runs:
         if last - first + 1 < MIN_RUN_WINDOWS:
             continue
-        if label < NUM_STROKES:
+        if 0 <= label < NUM_STROKES:
             if label != previous:
                 spans.append([label, first + offset, last + offset])
             else:
@@ -157,6 +175,23 @@ def stroke_metrics(spans, states, fps=TRAIN_FPS):
     return {"strokes": strokes, "interval_s_mean": interval_mean, "interval_s_cv": interval_cv}
 
 
+def stroke_times(spans, fps):
+    """Stroke spans -> [{"stroke": name, "start_s", "end_s"}] in seconds from the start of the video (flow report I1)."""
+    return [{"stroke": LABELS[label], "start_s": round(first / fps, 3), "end_s": round((last + 1) / fps, 3)}
+            for label, first, last in spans]
+
+
+def gap_windows(detected, fps):
+    """
+    One hand's detected flags at the source frame rate -> for every window at
+    TRAIN_FPS (as predict_window_labels makes them), whether it touches an
+    undetected gap longer than MAX_FILL_SECONDS.
+    """
+    gaps = long_gaps(detected, round(MAX_FILL_SECONDS * (fps or TRAIN_FPS))).astype(np.float32)[:, None, None]
+    gaps = to_training_fps({"gaps": gaps}, fps)["gaps"][:, 0, 0] > 0  # any overlap with a gap counts
+    return [bool(gaps[s:s + WINDOW_SIZE].any()) for s in range(len(gaps) - WINDOW_SIZE + 1)]
+
+
 def to_training_fps(positions, fps):
     """Resample each hand's positions to TRAIN_FPS unless fps is unknown or already within FPS_TOLERANCE of it."""
     if fps is None or abs(fps - TRAIN_FPS) / TRAIN_FPS <= FPS_TOLERANCE:
@@ -172,6 +207,7 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         "metrics": {"left": stroke_metrics(...), ...},
         "detection_rate": {"left": 0-1, "right": 0-1},
         "frame_scale": source frames per analysis frame (1.0 unless resampled),
+        "times": {"left": [{"stroke": name, "start_s": s, "end_s": s}], ...},
     }
     with left/right meaning what they meant in the training labels. Frames are
     counted at TRAIN_FPS after any resampling. on_progress(fraction) is called
@@ -184,7 +220,8 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
         if total:
             report(DETECTION_SHARE * min(done / total, 1.0))
 
-    positions, states, detection_rate = extract_hand_tracks(source, on_frame, getattr(model, "pose_angle", False))
+    positions, states, detection_rate, detected = extract_hand_tracks(
+        source, on_frame, getattr(model, "pose_angle", False), getattr(model, "palm_scale", False))
     fps = video_fps(source)
     resampled = to_training_fps(positions, fps)
     frame_scale = 1.0
@@ -194,18 +231,22 @@ def analyze(source, model, scaler, hand_to_slot, device, on_progress=None):
     positions = resampled
     report(DETECTION_SHARE)
 
-    result = {"events": {}, "spans": {}, "metrics": {}, "detection_rate": {}, "frame_scale": frame_scale}
+    result = {"events": {}, "spans": {}, "metrics": {}, "detection_rate": {}, "frame_scale": frame_scale, "times": {}}
+    analysis_fps = (fps or TRAIN_FPS) / frame_scale  # TRAIN_FPS after resampling, else the video's own rate
     for hand, slot in hand_to_slot.items():
         if len(positions[slot]) < WINDOW_SIZE:
             raise ValueError(f"Video too short (min {WINDOW_SIZE} frames required)")
         if detection_rate[slot] == 0:
             spans = []  # hand never seen: nothing to classify
         else:
-            spans = stroke_spans(predict_window_labels(positions[slot], slot, model, scaler, device, states[slot]))
+            labels = predict_window_labels(positions[slot], slot, model, scaler, device, states[slot])
+            labels = [GAP_LABEL if gap else label for label, gap in zip(labels, gap_windows(detected[slot], fps))]
+            spans = stroke_spans(labels)
         result["events"][hand] = [label for label, _, _ in spans]
         result["spans"][hand] = spans
         result["metrics"][hand] = stroke_metrics(spans, states[slot])
         result["detection_rate"][hand] = round(detection_rate[slot], 3)
+        result["times"][hand] = stroke_times(spans, analysis_fps)
     report(1.0)
     return result
 

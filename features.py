@@ -14,9 +14,11 @@ import numpy as np
 from data_pipeline import parse_frame_id
 from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, create_pose_tracker, read_upright_frames
 
-# x/y are scaled to pixel positions in this frame size (the training videos'
-# own resolution) whatever the input resolution, so the same motion gives the
-# same numbers for a 720p and a 1080p upload.
+# x/y are scaled to pixel positions as if the frame were the training videos'
+# 1280x720: the short side becomes 720 and both axes get the same factor
+# (reference_size), so the same motion gives the same numbers for a 720p and a
+# 1080p upload, and a portrait upload is measured in a 720x1280 frame instead
+# of being squashed into 1280x720.
 REFERENCE_WIDTH = 1280
 REFERENCE_HEIGHT = 720
 
@@ -24,21 +26,28 @@ HANDS = ("left", "right")
 _SLOT_TO_HAND = {"Left": "left", "Right": "right"}
 
 
+def reference_size(width, height):
+    """A frame's size in reference pixels: short side scaled to REFERENCE_HEIGHT, aspect ratio kept."""
+    scale = REFERENCE_HEIGHT / min(width, height)
+    return width * scale, height * scale
+
+
 def detect_hand_coords(image, hands):
     """
     One frame -> {"left": (21, 3) or None, "right": (21, 3) or None}, keyed by
-    MediaPipe's handedness slot. x/y in reference-frame pixels, z as MediaPipe
-    reports it. `hands` is a tracker from pipeline.create_hand_tracker().
+    MediaPipe's handedness slot. x/y in reference pixels (reference_size), z
+    as MediaPipe reports it. `hands` is a tracker from pipeline.create_hand_tracker().
     """
     labels, scores, hands_landmarks = hands.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
     coords = {"left": None, "right": None}
     if hands_landmarks:
+        width, height = reference_size(image.shape[1], image.shape[0])
         slots = _assign_hand_slots(labels, scores, [np.mean([lm.x for lm in hl]) for hl in hands_landmarks])
         for hand_landmarks, slot in zip(hands_landmarks, slots):
             if slot is None:
                 continue
             coords[_SLOT_TO_HAND[slot]] = np.array(
-                [[lm.x * REFERENCE_WIDTH, lm.y * REFERENCE_HEIGHT, lm.z] for lm in hand_landmarks],
+                [[lm.x * width, lm.y * height, lm.z] for lm in hand_landmarks],
                 dtype=np.float32,
             )
     return coords
@@ -133,22 +142,23 @@ def resample_to_fps(positions, fps, target_fps):
 ARM_MATCH_PALMS = 2.0
 
 
-def match_elbow(hand_coords, arms):
+def match_elbow(hand_coords, arms, frame_size):
     """
     One detected hand (21, 3) in reference pixels and the pose arms of the same
     frame [(elbow, wrist)] in normalized coordinates -> that hand's elbow (x, y)
-    in reference pixels, or None. The arm whose wrist is nearest the hand's
-    wrist is taken, if it is within ARM_MATCH_PALMS palm lengths; pose
-    left/right labels are not trusted.
+    in reference pixels, or None. frame_size is the frame's reference_size().
+    The arm whose wrist is nearest the hand's wrist is taken, if it is within
+    ARM_MATCH_PALMS palm lengths; pose left/right labels are not trusted.
     """
+    width, height = frame_size
     wrist = hand_coords[WRIST, :2]
     palm = float(np.linalg.norm(hand_coords[MIDDLE_MCP, :2] - wrist)) or 1.0
     best, best_distance = None, ARM_MATCH_PALMS * palm
     for elbow, arm_wrist in arms:
-        arm_wrist = np.array([arm_wrist[0] * REFERENCE_WIDTH, arm_wrist[1] * REFERENCE_HEIGHT])
+        arm_wrist = np.array([arm_wrist[0] * width, arm_wrist[1] * height])
         distance = float(np.linalg.norm(arm_wrist - wrist))
         if distance <= best_distance:
-            best = np.array([elbow[0] * REFERENCE_WIDTH, elbow[1] * REFERENCE_HEIGHT], dtype=np.float32)
+            best = np.array([elbow[0] * width, elbow[1] * height], dtype=np.float32)
             best_distance = distance
     return best
 
@@ -175,10 +185,11 @@ def extract_raw_tracks(source, on_frame=None, with_pose=False):
                     on_frame(done)
                 coords = detect_hand_coords(image, tracker)
                 arms = pose.arms(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)) if pose else []
+                frame_size = reference_size(image.shape[1], image.shape[0])
                 for hand in HANDS:
                     if coords[hand] is not None:
                         detected[hand][index] = coords[hand]
-                        elbow = match_elbow(coords[hand], arms) if arms else None
+                        elbow = match_elbow(coords[hand], arms, frame_size) if arms else None
                         if elbow is not None:
                             elbow_found[hand][index] = elbow
     finally:
@@ -218,20 +229,47 @@ def extract_hand_positions(source, on_frame=None):
     ({"left": (N, 21, 3), "right": (N, 21, 3)}, detection rates). Positions
     are interpolated and wrist-relative, ready for window_features().
     """
-    positions, _, rates = extract_hand_tracks(source, on_frame)
+    positions, _, rates, _ = extract_hand_tracks(source, on_frame)
     return positions, rates
 
 
-def extract_hand_tracks(source, on_frame=None, with_pose=False):
+def extract_hand_tracks(source, on_frame=None, with_pose=False, palm_scale=False):
     """
-    Like extract_hand_positions, plus each hand's wrist height and angle:
-    returns (positions, hand_states {"left": (N, 2), "right": (N, 2)}, detection rates).
+    Like extract_hand_positions, plus each hand's wrist height and angle and
+    which frames the hand was really detected in: returns (positions,
+    hand_states {"left": (N, 2), ...}, detection rates, detected {"left": (N,) bool, ...}).
     with_pose measures the wrist angle against the forearm (see hand_state).
+    palm_scale divides the positions' x and y by the hand's median palm length
+    in the video, so a hand twice as far from the camera gives the same
+    numbers (flow report F4); z is MediaPipe's own unit and is left as is.
     """
     raw, elbows = extract_raw_tracks(source, on_frame, with_pose)
     positions = {hand: wrist_relative(fill_missing(coords)) for hand, coords in raw.items()}
+    if palm_scale:
+        for hand, coords in raw.items():
+            positions[hand][..., :2] /= palm_length(coords)
     states = {hand: hand_state(coords, elbows[hand] if with_pose else None) for hand, coords in raw.items()}
-    return positions, states, detection_rates(raw)
+    detected = {hand: ~np.isnan(coords).any(axis=(1, 2)) for hand, coords in raw.items()}
+    return positions, states, detection_rates(raw), detected
+
+
+def long_gaps(detected, max_frames):
+    """
+    (N,) detected flags -> (N,) bool, True inside every run of undetected
+    frames longer than max_frames. fill_missing bridges any gap; over a long
+    one the "motion" it produces is made up (flow report H2).
+    """
+    detected = np.asarray(detected, dtype=bool)
+    gaps = np.zeros(len(detected), dtype=bool)
+    start = None
+    for i, seen in enumerate(np.append(detected, True)):
+        if not seen and start is None:
+            start = i
+        elif seen and start is not None:
+            if i - start > max_frames:
+                gaps[start:i] = True
+            start = None
+    return gaps
 
 
 WRIST, MIDDLE_MCP = 0, 9
@@ -243,6 +281,15 @@ def _fill_all(values):
     known = ~np.isnan(values).any(axis=1)
     frames = np.arange(len(values))
     return np.stack([np.interp(frames, frames[known], values[known, k]) for k in range(values.shape[1])], axis=1)
+
+
+def palm_length(raw_coords):
+    """Median wrist-to-middle-knuckle distance (x, y) over the frames the hand was detected in; 1.0 if never."""
+    coords = np.asarray(raw_coords, dtype=np.float32)
+    detected = ~np.isnan(coords).any(axis=(1, 2))
+    if not detected.any():
+        return 1.0
+    return float(np.median(np.linalg.norm(coords[detected, MIDDLE_MCP, :2] - coords[detected, WRIST, :2], axis=1))) or 1.0
 
 
 def hand_state(raw_coords, elbows=None):
@@ -275,11 +322,10 @@ def hand_state(raw_coords, elbows=None):
     if not detected.any():
         return states
     palm = filled[:, MIDDLE_MCP, :2] - filled[:, WRIST, :2]
-    palm_length = float(np.median(np.linalg.norm(palm[detected], axis=1))) or 1.0
     wrist_y = filled[:, WRIST, 1]
     lowest = float(wrist_y[detected].max())  # image y grows downward
     first = int(np.flatnonzero(detected)[0])
-    states[first:, 0] = (lowest - wrist_y[first:]) / palm_length
+    states[first:, 0] = (lowest - wrist_y[first:]) / palm_length(raw_coords)
     if elbows is not None and (~np.isnan(np.asarray(elbows, dtype=np.float32)).any(axis=1)).any():
         forearm = filled[:, WRIST, :2] - _fill_all(elbows)
         cross = forearm[:, 0] * palm[:, 1] - forearm[:, 1] * palm[:, 0]
@@ -300,31 +346,65 @@ def resample_length(values, length):
     return out.reshape((length,) + values.shape[1:]).astype(np.float32)
 
 
-def _with_velocity_and_acceleration(values):
+def _with_velocity_and_acceleration(values, backward=False):
     """
     (T, K, 3) -> (T, K, 9): value, frame-to-frame velocity, acceleration.
     Differencing leaves one fewer velocity and two fewer accelerations than
-    frames; the tail is zero-padded (thesis A23).
+    frames; the tail is zero-padded (thesis A23). With backward, velocity is
+    this frame minus the previous one and the padding is at the start instead
+    (flow report F2): the window's label and the LSTM's output are both
+    taken at the last frame, which the thesis layout leaves without motion.
     """
     velocity = np.zeros_like(values)
-    velocity[:-1] = values[1:] - values[:-1]
     acceleration = np.zeros_like(values)
-    acceleration[:-2] = velocity[1:-1] - velocity[:-2]
+    if backward:
+        velocity[1:] = values[1:] - values[:-1]
+        acceleration[2:] = velocity[2:] - velocity[1:-1]
+    else:
+        velocity[:-1] = values[1:] - values[:-1]
+        acceleration[:-2] = velocity[1:-1] - velocity[:-2]
     return np.concatenate([values, velocity, acceleration], axis=-1)
 
 
-def window_state_features(states):
+def window_state_features(states, backward=False):
     """One window of one hand's (T, 2) wrist height and angle -> (T, 6): values, velocity, acceleration."""
-    return _with_velocity_and_acceleration(states)
+    return _with_velocity_and_acceleration(states, backward)
 
 
-def window_features(positions):
+def window_features(positions, backward=False):
     """
     One window of one hand's wrist-relative positions (T, 21, 3) ->
     (joint features (T, 21, 9), bone features (T, 20, 9)) (thesis A22).
     """
     bones = np.stack([positions[:, j2] - positions[:, j1] for j1, j2 in BONE_CONNECTIONS], axis=1)
-    return _with_velocity_and_acceleration(positions), _with_velocity_and_acceleration(bones)
+    return _with_velocity_and_acceleration(positions, backward), _with_velocity_and_acceleration(bones, backward)
+
+
+# x of position, velocity and acceleration in the 9 joint / bone channels,
+# and the wrist angle with its velocity and acceleration in the 6 state channels.
+_X_CHANNELS = [0, 3, 6]
+_ANGLE_CHANNELS = [1, 3, 5]
+
+
+def window_inputs(positions, states, hand, backward=False, mirror_hands=False):
+    """
+    One window of one hand: positions (T, 21, 3), states (T, 2) -> (joint
+    features, bone features, state features, model slot). Training and
+    inference both build windows here, so they always match.
+
+    mirror_hands (flow report F5): the right hand is mirrored left-to-right
+    (x and the wrist angle change sign) and fed through the left-hand slot,
+    so both hands train the same weights instead of each its own half.
+    """
+    joints, bones = window_features(positions, backward)
+    state_features = window_state_features(states, backward)
+    if mirror_hands and hand == "right":
+        joints, bones, state_features = joints.copy(), bones.copy(), state_features.copy()
+        joints[..., _X_CHANNELS] *= -1
+        bones[..., _X_CHANNELS] *= -1
+        state_features[..., _ANGLE_CHANNELS] *= -1
+        hand = "left"
+    return joints, bones, state_features, hand
 
 
 class FeatureScaler:

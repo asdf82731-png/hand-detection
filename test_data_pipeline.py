@@ -1,7 +1,7 @@
 """
 Unit tests for data_pipeline.py, per TRAINING_DESIGN.md section 4. Each test
 encodes a specific decision from the design doc so changing that decision
-later should make the matching test fail loudly (CLAUDE.md Rule 9).
+later should make the matching test fail loudly (CLAUDE.md Rule 8).
 """
 import csv
 import os
