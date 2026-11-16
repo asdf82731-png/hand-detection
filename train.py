@@ -266,7 +266,8 @@ def macro_f1(y_true, y_pred):
 def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
         weighted=False, select_by="accuracy", model=None, lstm_input=None, bidir_ends=False, output_gelu=True):
     """
-    Trains and returns (best weights, their validation score), the best epoch
+    Trains and returns (best weights, their validation score, validation
+    metrics of those weights: accuracy, macro_f1, per-class f1), the best epoch
     being the one with the highest validation accuracy, or macro-F1 with
     select_by="macro_f1". model replaces the thesis model (baselines.py
     trains its GRU baseline through the same loop).
@@ -306,12 +307,22 @@ def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state
     print("AUC-ROC, one-vs-rest:")
     for name, auc in one_vs_rest_auc(y_true, y_prob).items():
         print(f"  {name:12s} {'not in validation set' if auc is None else f'{auc:.3f}'}")
-    return best_state, best_score
+    per_class = f1_score(y_true, y_pred, labels=label_ids, average=None, zero_division=0)
+    present = set(y_true)
+    metrics = {
+        "accuracy": float(np.mean(np.array(y_true) == np.array(y_pred))),
+        "macro_f1": macro_f1(y_true, y_pred),
+        "f1": {name: float(f) if i in present else None for i, (name, f) in enumerate(zip(LABELS, per_class))},
+        "val_windows": len(y_true),
+    }
+    return best_state, best_score, metrics
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--out", default=CHECKPOINT_PATH,
+                        help=f"where to save the model (default {CHECKPOINT_PATH}, the file the app loads)")
     parser.add_argument(
         "--csv-left-slot", required=True, type=csv_left_slot_spec,
         help="which detected hand the CSV's 'left' rows describe; check_data.py prints the value to use",
@@ -357,7 +368,7 @@ def main():
         [w[2] for w in train_windows] if args.hand_state else None,
     )
     state_dim = STATE_DIM if args.hand_state else 0
-    best_state, best_score = fit(
+    best_state, best_score, metrics = fit(
         to_dataset(train_windows, scaler, args.hand_state), to_dataset(val_windows, scaler, args.hand_state), device,
         embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
         lstm_input=args.lstm_input, bidir_ends=args.bidir_ends, output_gelu=args.output_gelu,
@@ -369,10 +380,10 @@ def main():
               "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
-         "config": config},
-        CHECKPOINT_PATH,
+         "config": config, "val_metrics": metrics},
+        args.out,
     )
-    print(f"saved {CHECKPOINT_PATH} (best val {args.select_by}={best_score:.3f})")
+    print(f"saved {args.out} (best val {args.select_by}={best_score:.3f})")
 
 
 if __name__ == "__main__":

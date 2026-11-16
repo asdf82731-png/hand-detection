@@ -24,6 +24,7 @@ same --seed:
 Not covered: the audio-onset rule (the pipeline reads no audio) and ST-GCN.
 """
 import argparse
+import json
 import os
 
 import numpy as np
@@ -104,6 +105,7 @@ def main():
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--csv-left-slot", required=True, type=csv_left_slot_spec, help="as for train.py")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--out", help="also write the results to this JSON file")
     args = parser.parse_args()
     set_seed(args.seed)
 
@@ -121,7 +123,7 @@ def main():
     scaler = FeatureScaler.fit([w[0] for w in train_windows], [w[1] for w in train_windows])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GRUBaseline(len(LABELS))
-    best_state, _ = fit(to_dataset(train_windows, scaler), to_dataset(val_windows, scaler), device, model=model)
+    best_state, _, _ = fit(to_dataset(train_windows, scaler), to_dataset(val_windows, scaler), device, model=model)
     model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
@@ -133,6 +135,9 @@ def main():
     for row, (accuracy, f1) in results.items():
         print(f"{row:12s} {accuracy:8.3f} {f1:8.3f}")
     print("Compare with train.py's best val accuracy / macro-F1 for the same --seed.")
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump({row: {"accuracy": a, "macro_f1": m} for row, (a, m) in results.items()}, f, indent=2)
 
 
 if __name__ == "__main__":
