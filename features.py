@@ -19,7 +19,6 @@ from pipeline import BONE_CONNECTIONS, _assign_hand_slots, create_hand_tracker, 
 # (reference_size), so the same motion gives the same numbers for a 720p and a
 # 1080p upload, and a portrait upload is measured in a 720x1280 frame instead
 # of being squashed into 1280x720.
-REFERENCE_WIDTH = 1280
 REFERENCE_HEIGHT = 720
 
 HANDS = ("left", "right")
