@@ -71,11 +71,19 @@ data/raw/P02_S03_E6_free.mp4       自由演奏
 另建一份 `data/raw/sessions.csv` 記錄每段的資訊：
 
 ```
-file,player,session,date,exercise,bpm,hand,fps,camera,split,notes
-P01_S01_E1_090_R.mp4,P01,S01,2026-11-20,E1,90,R,30,Pixel 4 front,train,
+file,player,session,date,exercise,bpm,hand,fps,camera,split,csv_left_slot,first_frame,label_spec,notes
+P01_S01_E1_090_R.mp4,P01,S01,2026-11-20,E1,90,R,30,Pixel 4 front,train,right,0,v1,
 ```
 
 `split` 欄寫 `train`、`val` 或 `test`，在錄影前就決定好，之後不再更動。
+
+後面三欄是為了日後不必重標（2026-11-17）：
+
+- `csv_left_slot`：這支影片 CSV 的 `left` 對應偵測到的哪隻手（`left` 或 `right`），用 `check_data.py` 的預覽圖確認後填入。對應錯了不會報錯，只會把標籤貼到另一隻手上；Down 那支影片就曾和其他三支相反。有這一欄，錯了只要對調，不用重標。
+- `first_frame`：逐幀圖片第一張的編號，照步驟 1 拆圖就是 `0`。幀編號差一，每個標籤都會錯一幀。
+- `label_spec`：依哪一版標註定義標的。目前是 `v1`，也就是 `TRAINING_DESIGN.md` 第 6 節（含 2026-11-13 的決定）。日後改定義，才知道哪些 CSV 要重看。
+
+另外，手機原始影片（含聲音）請保留，不要壓縮後丟掉。目前的程式不讀聲音，但日後要擊點時間，可以從聲音自動算，不用人工再標。
 
 ## 5. 標註流程
 
@@ -105,7 +113,13 @@ P01_S01_E1_090_R.mp4,P01,S01,2026-11-20,E1,90,R,30,Pixel 4 front,train,
    - 有沒有漏掉或多出的揮擊；
    - 沒偵測到手的幀不會有列，**不要補上**，讓它保持空白。
 
-4. **一致性檢查**：每個場次抽 10–20% 的影片，由第二個人從頭獨立標註，比對兩人的結果：
+4. **格式與順序檢查**：標完每個 CSV 都跑一次，它檢查兩件事：揮擊的前後銜接合不合論文規則（Full 後只能接 Full 或 Down，Down 後接 Up 或 Tab，Up 後接 Full 或 Down，Tab 後接 Up 或 Tab；中間隔著 `none` 就不比），以及停留標籤和上一次揮擊的終點矛盾沒有。有警告時逐幀看，是標錯就改，順序是真的就保留。
+
+   ```
+   python check_labels.py P01_S01_E1_090_R.csv
+   ```
+
+5. **一致性檢查**：每個場次抽 10–20% 的影片，由第二個人從頭獨立標註，比對兩人的結果：
 
    ```
    python autolabel.py check --auto 標註者A.csv --human 標註者B.csv
