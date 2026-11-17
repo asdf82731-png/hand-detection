@@ -168,7 +168,7 @@ CSV 的幀編號最大到 1003–1499，但 edit ver 影片只有 466–503 幀�
 在使用者電腦上（RTX 4060）訓練。四個動作的訓練視窗共約 6,800 個，驗證視窗約 1,400 個。
 
 - **訓練前修正**：驗證集原本是空的。切分點依整個圖片資料夾的長度計算，但 CSV 只標到前 1,000–1,500 幀，所以全部落在訓練集。已改成只在有標籤的範圍內切分（`split_train_val` 的 `first_frame` 參數）。
-- **左右手對應**：使用者確認 CSV 的 left/right 指鼓手自己的手，採用 `--csv-left-slot right`。
+- **左右手對應**：使用者確認 CSV 的 left/right 指鼓手自己的手，採用 `--csv-left-slot right`。✅ 2026-11-17 查清 Down 為何相反：四支都是前置鏡頭、沒有鏡像，Down 的 CSV 是依畫面左右標的（`left` 是鼓手的右手），其餘三支依鼓手自己的手標。
 
 | | `right`（採用） | `left` |
 |---|---|---|
@@ -293,6 +293,8 @@ Tab 整支影片都停在低位，但影片內標準化後 `high_mask` 仍切成
 同日複查後的修正：`--palm-scale` 原本只換算 x、y；H2 原本不回報沒計數的時間；`run_experiments.py` 的 `class_weights` 列同時改了類別權重與選模型方式，現在加上只改選模型方式的 `select_macro_f1` 列，`class_weights` 的變化量改成跟它比；子程序改在呼叫者的資料夾執行（相對路徑的 `--data-dir` 原本會找錯地方）；輸出資料夾記住 `--data-dir` 與 `--csv-left-slot`，不同就拒絕沿用。仍需資料或訓練的：H3、F1／REV-5 的消融、T1 的效果、I1 的調校、D1／D2 補資料；A3 依原計畫等新模型驗證後再移除舊程式。
 
 ### 2026-11-17 第一次選項比較結果
+
+⚠️ 這輪用的 `data\Down.csv` 是**未修正版**：`detection_by_label.log` 裡 Down 的 hold 幀數是 0、none 有 444／412 幀，也就是 Down 的低位停頓被讀成 none（見 2026-11-14「Down 的 hold 被讀成 none」），而 Tab 的同樣停頓是 down_hold。所以 Down 的數字（F1 down 0.684 ± 0.121）和「每種選項的效果」都可能受這個標籤問題影響。修正版 `Down_swapped_holdfix.csv`（對調 hand 欄位並把 hold 改成 down_hold）取代 `Down.csv` 後，左右手對應改用 `--csv-left-slot right`，需要重跑（新的輸出資料夾）。
 
 在使用者電腦上跑 `run_experiments.py --csv-left-slot right,Down=left`，種子 0–4，12 組全部完成（單一種子 1:52，其餘四個種子共 6:50）。驗證集是各影片時間軸最後一段；數字用來比選項，不是實際準確率（B1、B3 仍在）。基準 macro-F1 0.862 ± 0.017。
 
