@@ -30,14 +30,19 @@ class TestStrokeOrder(unittest.TestCase):
             ("up_hold", 3), ("full_stroke", 10), ("down_stroke", 15), ("down_hold", 2), ("tab_stroke", 12),
             ("up_stroke", 16), ("up_hold", 2)]), [])
 
-    def test_two_strokes_the_hand_cannot_chain_are_reported(self):
-        # The thesis allows only Up or Tap after a Down: either a stroke was missed
-        # between them or one of the two is mislabeled. The same with only a hold between.
-        for sequence in ([("down_stroke", 10), ("full_stroke", 10)],
-                         [("down_stroke", 10), ("down_hold", 2), ("down_stroke", 10)]):
+    def test_two_strokes_the_hand_cannot_chain_directly_are_reported(self):
+        # Down ends low and Full starts high, with no rest between them: either a
+        # stroke was missed or one of the two is mislabeled.
+        for sequence in ([("down_stroke", 10), ("full_stroke", 10)], [("up_stroke", 16), ("tab_stroke", 12)]):
             warnings = _warnings(sequence)
             self.assertEqual(len(warnings), 1, sequence)
             self.assertIn("may only be followed by", warnings[0])
+
+    def test_one_stroke_repeated_with_a_rest_between_is_not_reported(self):
+        # The thesis's single-stroke videos are exactly this: Down, rest, Down, rest.
+        # After a rest the lift is part of the next stroke, so any stroke may follow.
+        self.assertEqual(_warnings([("down_stroke", 15), ("down_hold", 4), ("down_stroke", 15), ("down_hold", 4)]), [])
+        self.assertEqual(_warnings([("up_stroke", 16), ("up_hold", 3), ("up_stroke", 16)]), [])
 
     def test_the_lift_before_a_stroke_may_sit_after_a_hold_at_the_other_end(self):
         # Decision of 2026-11-13: the lift before a Down is part of the Down, so a

@@ -9,12 +9,13 @@ training means labeling that video again.
 
 Two things are checked for each hand, and reported as warnings:
 
-1. Stroke order. Which stroke may follow which is the thesis's rule
-   (TRAINING_DESIGN.md 6.1, "之後可以接"): after full_stroke only Full or Down,
-   after down_stroke Up or Tab, after up_stroke Full or Down, after tab_stroke
-   Up or Tab. Holds between two strokes do not change that. A none between
-   them does: after an up_stroke the hand comes back down, and that return is
-   none (decision of 2026-11-13), so what follows is not compared.
+1. Stroke order, for two strokes with nothing between them. Which stroke may
+   follow which is the thesis's rule (TRAINING_DESIGN.md 6.1, "之後可以接"):
+   after full_stroke only Full or Down, after down_stroke Up or Tab, after
+   up_stroke Full or Down, after tab_stroke Up or Tab. Once the hand rests
+   (a hold) or moves between places (none) it may start anything, because
+   the lift before a stroke is part of the stroke: a video of one stroke
+   repeated, Down, hold, Down, hold, is right and is not reported.
 2. Holds. A stroke ends high (full, up) or low (down, tab), and up_hold means
    the hand rests high, down_hold low. A hold that contradicts where the last
    stroke ended, or one that changes the resting place with no movement
@@ -60,9 +61,9 @@ def label_runs(frame_labels, hand):
 
 def stroke_order_warnings(runs):
     """
-    One hand's runs -> warnings about a stroke that may not follow the last
-    one, or a hold that contradicts where the hand was. Everything before a
-    none or a gap of frames with no row is forgotten.
+    One hand's runs -> warnings about a stroke that may not directly follow the
+    last one, or a hold that contradicts where the hand was. Everything before
+    a none or a gap of frames with no row is forgotten.
     """
     warnings, previous_stroke, position, previous_last = [], None, None, None
     for label, first, last in runs:
@@ -76,7 +77,7 @@ def stroke_order_warnings(runs):
         elif label in HOLD_AT:
             if position is not None and position != HOLD_AT[label]:
                 warnings.append(f"frame {first}: {label} (rests {HOLD_AT[label]}) but the hand was {position}")
-            position = HOLD_AT[label]
+            previous_stroke, position = None, HOLD_AT[label]  # resting: the next stroke may start from anywhere
         else:  # none: moving between places
             previous_stroke = position = None
         previous_last = last
