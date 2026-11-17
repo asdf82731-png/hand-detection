@@ -115,11 +115,50 @@ class TestArchitectureFixes(unittest.TestCase):
             else:
                 self.assertAlmostEqual(lowest, -5.0, places=4)
 
+    def test_ablating_the_bone_path_removes_what_the_bones_contribute(self):
+        # The ablation asks whether the result needs the bone path. If the
+        # bone inputs still reached the output it would measure nothing.
+        from model import StrokeBiLSTMModel
+        torch.manual_seed(0)
+        x = torch.randn(2, 30, 62, 9)
+        y = x.clone()
+        y[:, :, 42:, :] += 1.0  # change only the 20 bone slots
+        for use_bones, should_change in ((True, True), (False, False)):
+            model = StrokeBiLSTMModel(7, state_dim=6, use_bones=use_bones).eval()
+            state = torch.randn(2, 30, 6)
+            self.assertEqual(not torch.allclose(model(x, state), model(y, state)), should_change, f"use_bones={use_bones}")
+        self.assertFalse(hasattr(StrokeBiLSTMModel(7, use_bones=False), "lstm_bone"))
+
+    def test_ablating_the_graph_layer_leaves_no_graph_to_train(self):
+        # Otherwise the "no graph" run would still be training one that the
+        # output does not use, and the parameter count would not show it.
+        from model import StrokeBiLSTMModel
+        count = lambda m: sum(p.numel() for p in m.parameters())
+        full = StrokeBiLSTMModel(7)
+        flat = StrokeBiLSTMModel(7, use_gcn=False)
+        for name in ("adj_joint", "gcn_joint", "adj_bone", "gcn_bone"):
+            self.assertTrue(hasattr(full, name))
+            self.assertFalse(hasattr(flat, name), name)
+        self.assertLess(count(flat), count(full))
+        for model in (flat, StrokeBiLSTMModel(7, use_gcn=False, use_bones=False, lstm_input=64, state_dim=6)):
+            out = model.eval()(torch.randn(2, 30, 62, 9), torch.randn(2, 30, 6) if model.state_dim else None)
+            self.assertEqual(out.shape, (2, 7))
+
+    def test_the_full_model_keeps_the_parameter_names_old_checkpoints_use(self):
+        # The ablations add no parameters to the default model, so every
+        # existing checkpoint still loads into it.
+        from model import StrokeBiLSTMModel
+        names = set(StrokeBiLSTMModel(7, state_dim=6).state_dict())
+        for expected in ("lie_embed_joint.fc.weight", "adj_bone.node_fc.weight", "gcn_bone.conv.weight",
+                         "lstm_bone.weight_ih_l0", "fc.weight"):
+            self.assertIn(expected, names)
+        self.assertEqual(StrokeBiLSTMModel(7).fc.in_features, 512)
+
     def test_checkpoint_rebuilds_the_architecture_it_was_trained_with(self):
         import os, tempfile
         from features import FeatureScaler
         from model import StrokeBiLSTMModel
-        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False}
+        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False, "use_bones": False, "use_gcn": False}
         model = StrokeBiLSTMModel(7, **config)
         scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
         with tempfile.TemporaryDirectory() as folder:
@@ -128,6 +167,7 @@ class TestArchitectureFixes(unittest.TestCase):
                         "hand_to_slot": {"left": "left", "right": "right"}, "config": config}, path)
             loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
         self.assertEqual((loaded.lstm_input, loaded.bidir_ends, loaded.output_gelu), (128, True, False))
+        self.assertEqual((loaded.use_bones, loaded.use_gcn), (False, False))
 
 
 def _raw_hand(wrist_y, palm=(0.0, -50.0), scale=1.0):

@@ -310,7 +310,9 @@ Tab 整支影片都停在低位，但影片內標準化後 `high_mask` 仍切成
 - `up_stroke` 沒有驗證樣本（Up 影片只有 15 個右手揮擊幀），無法評估；`down_stroke` F1 波動大（0.684 ± 0.121）。
 - 還沒用沒參與訓練的影片跑 `evaluate.py`，所以 App 的模型檔未更換。
 
-下一步（已寫成程式，待跑）：`palm_no_output_gelu`、`palm_lstm_input_128`（在 `palm_scale` 之上再試，變化量對 `palm_scale` 比），以及 `baselines.py` 新增的 `gru + palm_scale` 列，讓簡單模型用同樣的特徵比較。`run_experiments.py` 沿用同一個輸出資料夾時，已完成的訓練不重跑；舊的 `baselines_seed*.json` 缺新列，會自動重跑。
+下一步（已寫成程式，待跑）：`palm_no_output_gelu`、`palm_lstm_input_128`（在 `palm_scale` 之上再試，變化量對 `palm_scale` 比），以及 `baselines.py` 新增的 `gru + palm_scale` 列，讓簡單模型用同樣的特徵比較。
+
+架構消融（REV-8，同樣在 `palm_scale` 之上、對 `palm_scale` 比）：`palm_no_bones`（`--no-bones`，拿掉骨骼路徑，只留關節）、`palm_no_gcn`（`--no-gcn`，拿掉每條路徑的鄰接矩陣與圖卷積）。預設模型的參數名稱不變，舊模型檔照常載入。⚠️ 拿掉圖卷積時，LSTM 的輸入從每點 64 維變成 16 維，參數量一起大幅下降（含狀態特徵：434 萬 → 129 萬；拿掉骨骼路徑 → 290 萬；兩者都拿掉 → 83 萬），所以差異可能來自容量而不只是圖結構；`lstm_input_128`（105 萬）在這份資料上分數不變，可作為對照。`run_experiments.py` 沿用同一個輸出資料夾時，已完成的訓練不重跑；舊的 `baselines_seed*.json` 缺新列，會自動重跑。
 
 ## 同儕審查修訂項目（2026-11-13）
 
