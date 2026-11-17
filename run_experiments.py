@@ -16,7 +16,7 @@ run can be restarted with the same command; delete the file to redo it.
 (settings.json) and refuses others, so its table never mixes models trained
 on different data or hand mappings.
 Each train.py run reads the videos and detects the hands again, so one run
-takes minutes: 12 experiments x 5 seeds is a long job.
+takes minutes: 14 experiments x 5 seeds is a long job.
 
 Results go to <out-dir>/results.md. With one seed, a difference between two
 rows can be noise; use several seeds and trust only differences larger than
@@ -51,11 +51,19 @@ EXPERIMENTS = [
     ("lstm_input_128", ["--lstm-input", "128"]),           # M1
     ("bidir_ends", ["--bidir-ends"]),                      # M2
     ("no_output_gelu", ["--no-output-gelu"]),              # M3
+    # palm_scale was the only option clearly above the seed-to-seed spread
+    # (2026-11-17), so the options that leaned positive are tried on top of it.
+    ("palm_no_output_gelu", ["--no-output-gelu", "--palm-scale"]),
+    ("palm_lstm_input_128", ["--lstm-input", "128", "--palm-scale"]),
 ]
 # Class weights are meant to go with macro-F1 selection, and choosing the
 # epoch by macro-F1 raises macro-F1 by itself: against "baseline" that gain
 # would be credited to the weights.
-COMPARED_WITH = {"class_weights": "select_macro_f1"}
+COMPARED_WITH = {"class_weights": "select_macro_f1", "palm_no_output_gelu": "palm_scale",
+                 "palm_lstm_input_128": "palm_scale"}
+# baselines.py rows a baselines_seed*.json must hold to count as done: a file
+# written before a row existed is redone instead of silently lacking it.
+BASELINE_ROWS = ("majority", "rule", "rule + type", "gru", "gru + palm_scale")
 STROKES = ["full_stroke", "down_stroke", "up_stroke", "tab_stroke"]
 
 
@@ -75,6 +83,15 @@ def chosen_experiments(only):
     names = set(only or [name for name, _ in EXPERIMENTS]) | {"baseline"}
     names |= {COMPARED_WITH[name] for name in names if name in COMPARED_WITH}
     return [(name, extra) for name, extra in EXPERIMENTS if name in names]
+
+
+def baselines_done(path):
+    """True if path holds every BASELINE_ROWS row."""
+    if not os.path.exists(path):
+        return False
+    with open(path, encoding="utf-8") as f:
+        found = json.load(f)
+    return all(row in found for row in BASELINE_ROWS)
 
 
 def claim_out_dir(out_dir, settings):
@@ -175,7 +192,7 @@ def main():
         if not args.skip_baselines:
             out = os.path.join(args.out_dir, f"baselines_seed{seed}.json")
             log = out.replace(".json", ".log")
-            if not os.path.exists(out):
+            if not baselines_done(out):
                 print(f"[baselines seed {seed}] -> {log}")
                 if not run([sys.executable, os.path.join(HERE, "baselines.py"), "--data-dir", args.data_dir,
                             "--csv-left-slot", args.csv_left_slot, "--seed", str(seed), "--out", out], log):

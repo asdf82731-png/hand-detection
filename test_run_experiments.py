@@ -9,7 +9,9 @@ import sys
 import tempfile
 import unittest
 
-from run_experiments import COMPARED_WITH, EXPERIMENTS, chosen_experiments, claim_out_dir, results_table, run
+from run_experiments import (
+    BASELINE_ROWS, COMPARED_WITH, EXPERIMENTS, baselines_done, chosen_experiments, claim_out_dir, results_table, run,
+)
 
 
 def _metrics(acc, f1, up=None):
@@ -67,6 +69,15 @@ class TestResultsTable(unittest.TestCase):
                          ["baseline", "select_macro_f1", "class_weights"])
         self.assertEqual(chosen_experiments(None), EXPERIMENTS)
 
+    def test_options_tried_on_top_of_palm_scale_are_measured_against_it(self):
+        # palm_scale gains +0.05 on its own; measured against "baseline", the
+        # rows built on it would all look like wins whatever their own option does.
+        for name in ("palm_no_output_gelu", "palm_lstm_input_128"):
+            self.assertEqual(COMPARED_WITH[name], "palm_scale")
+            self.assertIn("--palm-scale", dict(EXPERIMENTS)[name])
+        self.assertEqual([n for n, _ in chosen_experiments(["palm_lstm_input_128"])],
+                         ["baseline", "palm_scale", "palm_lstm_input_128"])
+
 
 class TestRuns(unittest.TestCase):
     def test_runs_start_in_the_callers_folder(self):
@@ -82,6 +93,19 @@ class TestRuns(unittest.TestCase):
                     self.assertEqual(os.path.realpath(log.read().strip()), os.path.realpath(folder))
             finally:
                 os.chdir(here)
+
+    def test_baseline_results_from_before_a_row_existed_are_redone(self):
+        # An existing file is skipped; one written before "gru + palm_scale"
+        # existed would leave that row out of the table with no sign of why.
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "baselines_seed0.json")
+            self.assertFalse(baselines_done(path))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({row: {} for row in BASELINE_ROWS if row != "gru + palm_scale"}, f)
+            self.assertFalse(baselines_done(path))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({row: {} for row in BASELINE_ROWS}, f)
+            self.assertTrue(baselines_done(path))
 
     def test_an_output_folder_is_not_reused_for_other_settings(self):
         # Finished runs are skipped, so after a change of --csv-left-slot the

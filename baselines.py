@@ -20,6 +20,11 @@ same --seed:
 - gru:       a one-layer GRU on the raw wrist-relative keypoints (positions
              only, no bones, no Lie group embedding, no graph), trained by the
              same loop as the thesis model.
+- gru + palm_scale: the same GRU on positions in palm lengths (train.py
+             --palm-scale), so it can be set against the thesis model with
+             the same feature. In the first comparison (2026-11-17) the plain
+             GRU matched the thesis model, and --palm-scale was the only
+             option that helped it.
 
 Not covered: the audio-onset rule (the pipeline reads no audio) and ST-GCN.
 """
@@ -100,6 +105,18 @@ def scores(y_true, y_pred):
     return float(np.mean(np.array(y_true) == np.array(y_pred))), macro_f1(y_true, y_pred)
 
 
+def gru_scores(train_windows, val_windows, device):
+    """Train the GRU baseline on train_windows (train.fit's loop) -> (accuracy, macro-F1) on val_windows."""
+    scaler = FeatureScaler.fit([w[0] for w in train_windows], [w[1] for w in train_windows])
+    model = GRUBaseline(len(LABELS))
+    best_state, _, _ = fit(to_dataset(train_windows, scaler), to_dataset(val_windows, scaler), device, model=model)
+    model.load_state_dict(best_state)
+    model.eval()
+    with torch.no_grad():
+        inputs = to_dataset(val_windows, scaler).tensors[0].to(device)
+        return scores([label for *_, label in val_windows], model(inputs).argmax(dim=1).tolist())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--data-dir", default="data")
@@ -120,15 +137,17 @@ def main():
             raise RuntimeError(f"{row}: {len(y_true)} validation windows, train.py has {len(val_labels)}")
         results[row] = scores(y_true, y_pred)
 
-    scaler = FeatureScaler.fit([w[0] for w in train_windows], [w[1] for w in train_windows])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = GRUBaseline(len(LABELS))
-    best_state, _, _ = fit(to_dataset(train_windows, scaler), to_dataset(val_windows, scaler), device, model=model)
-    model.load_state_dict(best_state)
-    model.eval()
-    with torch.no_grad():
-        inputs = to_dataset(val_windows, scaler).tensors[0].to(device)
-        results["gru"] = scores(val_labels, model(inputs).argmax(dim=1).tolist())
+    results["gru"] = gru_scores(train_windows, val_windows, device)
+
+    # Same seed, same videos and windows, positions in palm lengths. The
+    # windows do not move (palm_scale only rescales positions), so the
+    # validation labels above still apply.
+    set_seed(args.seed)
+    palm_train, palm_val = load_split_windows(args.data_dir, args.csv_left_slot, palm_scale=True)
+    if [label for *_, label in palm_val] != val_labels:
+        raise RuntimeError("gru + palm_scale: validation windows differ from the others")
+    results["gru + palm_scale"] = gru_scores(palm_train, palm_val, device)
 
     print(f"\nvalidation windows: {len(val_labels)}")
     print(f"{'baseline':12s} {'accuracy':>8s} {'macro_f1':>8s}")
