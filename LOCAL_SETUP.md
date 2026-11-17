@@ -107,6 +107,14 @@ python train.py --data-dir data --csv-left-slot <left 或 right，例外寫成 l
 
 App 版的選項（預設都關閉，說明見 `TRAINING_DESIGN.md` 第 8 節）：`--embedding development`（不受速度影響的 Lie group 嵌入）、`--hand-state`（加入手腕高度與夾角）、`--time-stretch`（訓練時加入快慢不同的版本）。建議一次只開一個，和不加選項的結果比較。
 
+### 長時間訓練前先檢查
+
+```
+python preflight.py --data-dir data --out-dir experiments_1117
+```
+
+幾秒鐘跑完，不改任何東西。它檢查：套件和 GPU、四支影片的標籤檔與畫面都在、幀編號對得上、標籤讀得進去、**停頓沒有被讀成 none**（2026-11-16 那輪的 Down.csv 就是這樣）、有揮擊的影片也有停頓、影片不是幾乎全是 none（動作沒標）、揮擊順序（`check_labels.py`）、硬碟空間。**ERROR 要先修掉才開始訓練**；WARNING 是給人看的。
+
 ### 一次比較所有選項
 
 ```
