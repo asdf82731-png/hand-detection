@@ -2,10 +2,15 @@ import torch
 import torch.nn as nn
 
 
-class LieGroupEmbedding(nn.Module):
-    def __init__(self, input_dim, lie_dim):
-        super(LieGroupEmbedding, self).__init__()
-        self.fc = nn.Linear(input_dim, lie_dim)
+class CumulativeEmbedding(nn.Module):
+    """
+    A linear map applied to every frame, summed over time. The thesis (3.6.1)
+    calls this a Lie group embedding, but there is no Lie group operation in
+    it; for a real one see PathDevelopment (REV-8, PEER_REVIEW EIC-2).
+    """
+    def __init__(self, input_dim, embed_dim):
+        super(CumulativeEmbedding, self).__init__()
+        self.fc = nn.Linear(input_dim, embed_dim)
 
     def forward(self, x):
         batch, time, nodes, features = x.size()
@@ -54,13 +59,13 @@ class MultiMotionDevLSTMModel(nn.Module):
         super(MultiMotionDevLSTMModel, self).__init__()
 
         # Joint path (42 joints)
-        self.lie_embed_joint = LieGroupEmbedding(input_dim=9, lie_dim=16)
+        self.lie_embed_joint = CumulativeEmbedding(input_dim=9, embed_dim=16)
         self.dynamic_adj_joint = DynamicAdjacencyMatrix(input_dim=16, num_nodes=42)
         self.residual_joint = ResidualCTRGCNLayer(in_channels=16, out_channels=64, num_nodes=42)
         self.lstm_joint = nn.LSTM(input_size=64 * 42, hidden_size=64, batch_first=True)  # 2688 in features
 
         # Bone path (20 bones)
-        self.lie_embed_bone = LieGroupEmbedding(input_dim=6, lie_dim=16)
+        self.lie_embed_bone = CumulativeEmbedding(input_dim=6, embed_dim=16)
         self.dynamic_adj_bone = DynamicAdjacencyMatrix(input_dim=16, num_nodes=20)
         self.residual_bone = ResidualCTRGCNLayer(in_channels=16, out_channels=64, num_nodes=20)
         self.lstm_bone = nn.LSTM(input_size=64 * 20, hidden_size=64, batch_first=True)  # 1280 in features
@@ -106,11 +111,11 @@ class PathDevelopment(nn.Module):
     M is linear with no bias, so the result depends on the path, not on how
     fast it was traversed: splitting a straight step into two half steps
     gives exactly the same Z, and a curved path played slower gives nearly
-    the same Z. LieGroupEmbedding (a linear map summed over frames) does not
+    the same Z. CumulativeEmbedding (a linear map summed over frames) does not
     have this property. Only the 3 position channels are developed; velocity
     and acceleration change with speed by definition.
 
-    Output (B, T, N, m*m): Z_t flattened, so m=4 matches lie_dim=16.
+    Output (B, T, N, m*m): Z_t flattened, so m=4 matches embed_dim=16.
     """
 
     def __init__(self, path_dim=3, group_dim=4):
@@ -205,7 +210,7 @@ class StrokeBiLSTMModel(nn.Module):
         self.lstm_input, self.bidir_ends, self.output_gelu = lstm_input, bidir_ends, output_gelu
 
         def embed():
-            return LieGroupEmbedding(input_dim=9, lie_dim=16) if embedding == "cumulative" else PathDevelopment()
+            return CumulativeEmbedding(input_dim=9, embed_dim=16) if embedding == "cumulative" else PathDevelopment()
 
         def project(nodes):
             return nn.Linear(64 * nodes, lstm_input) if lstm_input else nn.Identity()

@@ -34,6 +34,7 @@ same model as before; see TRAINING_DESIGN.md):
 options give the same model and differences between options can be trusted.
 """
 import argparse
+import hashlib
 import os
 import random
 
@@ -234,6 +235,12 @@ def one_vs_rest_auc(y_true, y_prob):
     return aucs
 
 
+def file_sha256(path):
+    """Content hash of a label CSV; evaluate.py compares it with the evaluation CSVs."""
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
 def set_seed(seed):
     """Fix every random source training uses, so a run can be repeated exactly."""
     random.seed(seed)
@@ -377,7 +384,10 @@ def main():
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
               "output_gelu": args.output_gelu, "csv_left_slot_overrides": args.csv_left_slot[1],
-              "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands}
+              "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands,
+              # evaluate.py refuses to score a checkpoint on its own training videos.
+              "train_csv_sha256": [file_sha256(data_sources(args.data_dir, name)[1]) for name in VIDEO_NAMES
+                                   if os.path.exists(data_sources(args.data_dir, name)[1])]}
     torch.save(
         {"model_state": best_state, "scaler": scaler.state_dict(), "labels": LABELS, "hand_to_slot": csv_hand_to_slot,
          "config": config, "val_metrics": metrics},
