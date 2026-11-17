@@ -116,7 +116,7 @@ python run_experiments.py --data-dir data --csv-left-slot <同上> --seeds 0 1 2
 依序訓練「不加選項的基準」和每個選項各一次（每個種子都跑），另外跑 `baselines.py`（多數類別、規則式、GRU）與 `detection_by_label.py`（揮擊／停留各自的偵測率），最後把結果整理成 `experiments/results.md` 的比較表。
 
 - 每次訓練的模型與完整輸出都存在 `experiments/`，**不會覆寫 App 用的 `multi_motion_model_7class.pt`**。要讓 App 改用某個新模型，自己把它複製過去。
-- 每次訓練都要重新偵測手部，一次要幾分鐘；12 組 × 5 個種子要跑很久。中斷後用同一行指令重跑，已完成的會跳過。
+- 每次訓練都要重新偵測手部，一次要幾分鐘；14 組 × 5 個種子要跑很久。中斷後用同一行指令重跑，已完成的會跳過。
 - 一個輸出資料夾只接受同一組 `--data-dir` 與 `--csv-left-slot`（記在 `experiments/settings.json`）。換了其中一個，用 `--out-dir <新資料夾>`，否則表格會把舊模型算在新設定底下。
 - 只跑一個種子時，兩列的差距可能只是隨機差異；跑多個種子，只相信大於種子間差異（± 後面的數字）的差距。
 - 「Δ macro-F1」是跟基準比的變化量。例外是 `class_weights`：它同時用 macro-F1 選最佳輪次，所以跟只改選模型方式的 `select_macro_f1` 比，格子裡會寫明。
