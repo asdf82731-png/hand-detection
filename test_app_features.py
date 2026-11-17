@@ -11,10 +11,13 @@ import unittest
 import numpy as np
 import torch
 
-from evaluate import labeled_strokes, match_events, score
+import os
+import tempfile
+
+from evaluate import block_counts, check_independent, labeled_strokes, macro_f1, match_events, score, summarize
 from features import hand_state, resample_length
 from inference import WINDOW_SIZE, load_checkpoint, stroke_metrics, stroke_spans
-from model import LieGroupEmbedding, PathDevelopment
+from model import CumulativeEmbedding, PathDevelopment
 from pipeline import build_suggestions, expected_count_accuracy
 from train import TIME_STRETCH_FACTORS, stretched_starts
 
@@ -51,7 +54,7 @@ class TestPathDevelopment(unittest.TestCase):
     def test_the_original_cumulative_embedding_does_depend_on_speed(self):
         # Pins why PathDevelopment was added: summing a linear map over frames
         # gives a different result when the same path takes more frames.
-        emb = LieGroupEmbedding(input_dim=9, lie_dim=16)
+        emb = CumulativeEmbedding(input_dim=9, embed_dim=16)
         fast, slow = emb(_path(11)), emb(_path(21))
         self.assertGreater((fast[0, -1] - slow[0, -1]).abs().max().item(), 0.1)
 
@@ -272,6 +275,73 @@ class TestEventEvaluation(unittest.TestCase):
         result = score([(FULL, 0, 5), (FULL, 6, 10)], [(FULL, 0, 10)])["Full"]
         self.assertEqual((result["labeled"], result["detected"], result["count_error"]), (1, 2, 1))
         self.assertEqual((result["precision"], result["recall"]), (0.5, 1.0))
+
+
+class TestSpeedCeiling(unittest.TestCase):
+    # TRAINING_DESIGN.md 10.1 promises users at most 5 strokes per hand per
+    # second at 30fps (16ths up to 150 BPM). If MIN_RUN_WINDOWS changes, this
+    # fails and the documented range must be recomputed.
+
+    def test_three_frame_strokes_and_holds_are_each_counted(self):
+        self.assertEqual(len(stroke_spans(([DOWN] * 3 + [DOWN_HOLD] * 3) * 4)), 4)
+
+    def test_a_two_frame_hold_merges_strokes_so_faster_playing_is_undercounted(self):
+        self.assertEqual(len(stroke_spans(([DOWN] * 3 + [DOWN_HOLD] * 2) * 4)), 1)
+
+
+class TestEvaluationProtocol(unittest.TestCase):
+    # REV-7: a reported number must come from unseen videos, weigh rare stroke
+    # types equally, and carry an interval that respects correlated strokes.
+
+    def test_macro_f1_weighs_a_rare_stroke_type_as_much_as_a_common_one(self):
+        # 100 Full all right, 2 Up all missed: accuracy-like pooling says ~98%,
+        # but the app fails on Up, so the headline number must show it.
+        counts = np.zeros((4, 3), dtype=np.int64)
+        counts[FULL] = (100, 100, 100)
+        counts[UP] = (2, 0, 0)
+        self.assertAlmostEqual(macro_f1(counts), 0.5)
+
+    def test_a_stroke_type_never_played_does_not_enter_macro_f1(self):
+        counts = np.zeros((4, 3), dtype=np.int64)
+        counts[FULL] = (10, 10, 10)
+        self.assertEqual(macro_f1(counts), 1.0)
+
+    def test_block_counts_match_score_even_across_a_block_edge(self):
+        # Splitting into blocks must not change what counts as a match, or the
+        # interval would describe a different number than the one reported.
+        labeled = [(DOWN, 298, 310), (DOWN, 400, 410)]
+        detected = [(DOWN, 301, 312), (UP, 400, 410)]
+        total = sum(block_counts(detected, labeled, block_frames=300).values())
+        s = score(detected, labeled)
+        self.assertEqual(total[DOWN].tolist(), [s["Down"]["labeled"], s["Down"]["detected"], 1])
+
+    def test_interval_widens_when_blocks_disagree(self):
+        # Same pooled F1, but one half all right and one half all wrong is less
+        # certain than every block half right; a fixed interval would hide that.
+        good, bad, half = (np.zeros((4, 3), dtype=np.int64) for _ in range(3))
+        good[FULL], bad[FULL], half[FULL] = (10, 10, 10), (10, 10, 0), (10, 10, 5)
+        mixed = summarize([good, bad] * 5)["per_type"]["Full"]["f1_ci"]
+        steady = summarize([half] * 10)["per_type"]["Full"]["f1_ci"]
+        self.assertGreater(mixed[1] - mixed[0], steady[1] - steady[0])
+
+    def test_too_few_labeled_strokes_are_flagged(self):
+        counts = np.zeros((4, 3), dtype=np.int64)
+        counts[UP] = (3, 3, 3)
+        self.assertFalse(summarize([counts])["per_type"]["Up"]["enough_support"])
+
+    def test_evaluating_on_a_training_video_is_refused(self):
+        # Scoring a model on what it trained on reports memory, not recognition.
+        from evaluate import file_sha256
+        with tempfile.TemporaryDirectory() as d:
+            csv_path, ckpt = os.path.join(d, "Full.csv"), os.path.join(d, "m.pt")
+            with open(csv_path, "w") as f:
+                f.write("frame,hand,label\n0,left,full_stroke\n")
+            digest = file_sha256(csv_path)
+            torch.save({"config": {"train_csv_sha256": [digest]}}, ckpt)
+            with self.assertRaises(SystemExit):
+                check_independent(ckpt, [csv_path])
+            torch.save({"config": {"train_csv_sha256": ["0" * 64]}}, ckpt)
+            check_independent(ckpt, [csv_path])  # unseen video: allowed
 
 
 
