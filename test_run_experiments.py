@@ -11,6 +11,7 @@ import unittest
 
 from run_experiments import (
     BASELINE_ROWS, COMPARED_WITH, EXPERIMENTS, baselines_done, chosen_experiments, claim_out_dir, results_table, run,
+    run_settings,
 )
 
 
@@ -117,6 +118,22 @@ class TestRuns(unittest.TestCase):
             claim_out_dir(out, json.loads(json.dumps(settings)))  # the same command again: resumes
             with self.assertRaises(ValueError):
                 claim_out_dir(out, {**settings, "csv_left_slot": ["right", {}]})
+
+    def test_a_label_file_that_changed_under_the_same_name_is_a_different_run(self):
+        # Down.csv was replaced by a corrected file with the same name. The hand mapping
+        # string changed too that time, but it need not: finished runs are skipped, so
+        # without the file's hash the old models would be shown under the new labels.
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as out:
+            csv_path = os.path.join(data, "Down.csv")
+            with open(csv_path, "w", encoding="utf-8") as f:
+                f.write("frame_id,hand,stroke\nframe_0000.jpg,left,none\n")
+            spec = ("right", {})
+            claim_out_dir(out, run_settings(data, spec))
+            claim_out_dir(out, run_settings(data, spec))  # unchanged: resumes
+            with open(csv_path, "w", encoding="utf-8") as f:
+                f.write("frame_id,hand,stroke\nframe_0000.jpg,left,down_hold\n")
+            with self.assertRaises(ValueError):
+                claim_out_dir(out, run_settings(data, spec))
 
     def test_results_with_no_record_of_their_settings_are_not_trusted(self):
         with tempfile.TemporaryDirectory() as folder:

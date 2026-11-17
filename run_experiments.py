@@ -23,6 +23,7 @@ rows can be noise; use several seeds and trust only differences larger than
 the spread across seeds (TRAINING_DESIGN.md, REV-7).
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -31,7 +32,7 @@ import sys
 import numpy as np
 import torch
 
-from train import csv_left_slot_spec
+from train import VIDEO_NAMES, csv_left_slot_spec, data_sources
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -95,6 +96,23 @@ def baselines_done(path):
     with open(path, encoding="utf-8") as f:
         found = json.load(f)
     return all(row in found for row in BASELINE_ROWS)
+
+
+def run_settings(data_dir, spec):
+    """
+    What this output folder's results are for: the data folder, the hand mapping
+    and a hash of each label CSV. The hashes are there because a label file can
+    change under the same name (Down.csv was replaced by a corrected one), and
+    finished runs are reused, so old models would otherwise sit in the table
+    under the new labels.
+    """
+    hashes = {}
+    for name in VIDEO_NAMES:
+        csv_path = data_sources(data_dir, name)[1]
+        if os.path.exists(csv_path):
+            with open(csv_path, "rb") as f:
+                hashes[name] = hashlib.sha256(f.read()).hexdigest()
+    return {"data_dir": os.path.abspath(data_dir), "csv_left_slot": list(spec), "csv_sha256": hashes}
 
 
 def claim_out_dir(out_dir, settings):
@@ -177,7 +195,7 @@ def main():
     except argparse.ArgumentTypeError as error:
         parser.error(f"--csv-left-slot: {error}")
     try:
-        claim_out_dir(args.out_dir, {"data_dir": os.path.abspath(args.data_dir), "csv_left_slot": list(spec)})
+        claim_out_dir(args.out_dir, run_settings(args.data_dir, spec))
     except ValueError as error:
         parser.error(f"--out-dir: {error}")
 

@@ -292,6 +292,12 @@ Tab 整支影片都停在低位，但影片內標準化後 `high_mask` 仍切成
 
 同日複查後的修正：`--palm-scale` 原本只換算 x、y；H2 原本不回報沒計數的時間；`run_experiments.py` 的 `class_weights` 列同時改了類別權重與選模型方式，現在加上只改選模型方式的 `select_macro_f1` 列，`class_weights` 的變化量改成跟它比；子程序改在呼叫者的資料夾執行（相對路徑的 `--data-dir` 原本會找錯地方）；輸出資料夾記住 `--data-dir` 與 `--csv-left-slot`，不同就拒絕沿用。仍需資料或訓練的：H3、F1／REV-5 的消融、T1 的效果、I1 的調校、D1／D2 補資料；A3 依原計畫等新模型驗證後再移除舊程式。
 
+### 2026-11-17 重跑前的檢查
+
+- 修正版 `Down_swapped_holdfix.csv` 已和原檔逐列比對：只有 hand 對調、`none` 的停頓改成 `down_hold`，其餘欄位不變；四支影片的順序檢查（`check_labels.py`）只剩 Up 一個警告。
+- **`Up.csv` 幾乎沒標**：左手 1461 列全是 `none`，右手 15 列 `up_stroke`、1 列 `up_hold`、68 列 `down_hold`、1377 列 `none`。這支影片的動作大多被標成 none，所以 `up_stroke` 沒有可訓練也沒有可驗證的樣本，而且 none 類別（修正 Down 之後只剩 Up 有 none）學到的是「Up 練習的動作」。重跑時 Up 仍照原樣放進去，這樣和上一輪只差 Down 一件事，結果才能對照；Up 要重標或補錄之後，才是真正的重訓。
+- 新增 `preflight.py`（訓練前檢查資料與環境）；`run_experiments.py` 的輸出資料夾現在也記錄每份標籤檔的 hash，標籤檔換了內容就拒絕沿用舊結果。
+
 ### 2026-11-17 第一次選項比較結果
 
 ⚠️ 這輪用的 `data\Down.csv` 是**未修正版**：`detection_by_label.log` 裡 Down 的 hold 幀數是 0、none 有 444／412 幀，也就是 Down 的低位停頓被讀成 none（見 2026-11-14「Down 的 hold 被讀成 none」），而 Tab 的同樣停頓是 down_hold。所以 Down 的數字（F1 down 0.684 ± 0.121）和「每種選項的效果」都可能受這個標籤問題影響。修正版 `Down_swapped_holdfix.csv`（對調 hand 欄位並把 hold 改成 down_hold）取代 `Down.csv` 後，左右手對應改用 `--csv-left-slot right`，需要重跑（新的輸出資料夾）。
