@@ -16,7 +16,7 @@ run can be restarted with the same command; delete the file to redo it.
 (settings.json) and refuses others, so its table never mixes models trained
 on different data or hand mappings.
 Each train.py run reads the videos and detects the hands again, so one run
-takes minutes: 14 experiments x 5 seeds is a long job.
+takes minutes: 16 experiments x 5 seeds is a long job.
 
 Results go to <out-dir>/results.md. With one seed, a difference between two
 rows can be noise; use several seeds and trust only differences larger than
@@ -55,12 +55,15 @@ EXPERIMENTS = [
     # (2026-11-17), so the options that leaned positive are tried on top of it.
     ("palm_no_output_gelu", ["--no-output-gelu", "--palm-scale"]),
     ("palm_lstm_input_128", ["--lstm-input", "128", "--palm-scale"]),
+    # Ablations on top of palm_scale: does the result need the bone path, the graph layer?
+    ("palm_no_bones", ["--no-bones", "--palm-scale"]),
+    ("palm_no_gcn", ["--no-gcn", "--palm-scale"]),
 ]
 # Class weights are meant to go with macro-F1 selection, and choosing the
 # epoch by macro-F1 raises macro-F1 by itself: against "baseline" that gain
 # would be credited to the weights.
 COMPARED_WITH = {"class_weights": "select_macro_f1", "palm_no_output_gelu": "palm_scale",
-                 "palm_lstm_input_128": "palm_scale"}
+                 "palm_lstm_input_128": "palm_scale", "palm_no_bones": "palm_scale", "palm_no_gcn": "palm_scale"}
 # baselines.py rows a baselines_seed*.json must hold to count as done: a file
 # written before a row existed is redone instead of silently lacking it.
 BASELINE_ROWS = ("majority", "rule", "rule + type", "gru", "gru + palm_scale")

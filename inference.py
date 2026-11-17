@@ -55,6 +55,8 @@ def load_checkpoint(path, device):
         lstm_input=config.get("lstm_input"),
         bidir_ends=config.get("bidir_ends", False),
         output_gelu=config.get("output_gelu", True),
+        use_bones=config.get("use_bones", True),
+        use_gcn=config.get("use_gcn", True),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()

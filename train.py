@@ -25,6 +25,9 @@ same model as before; see TRAINING_DESIGN.md):
     --bidir-ends              backward LSTM read at the first step instead of the last
     --no-output-gelu          no GELU on the class scores
                               (these three: model.StrokeBiLSTMModel; flow report M1-M3, REV-8)
+    --no-bones                drop the bone path (joints only)
+    --no-gcn                  drop the adjacency and graph layer in each path
+                              (these two are ablations: which part of the architecture the result needs)
     --backward-diff           velocity = this frame minus the previous, so the last frame has motion (F2)
     --palm-scale              positions in palm lengths, not pixels, so camera distance does not matter (F4)
     --mirror-hands            mirror the right hand and train both hands on the same weights (F5)
@@ -271,7 +274,8 @@ def macro_f1(y_true, y_pred):
 
 
 def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
-        weighted=False, select_by="accuracy", model=None, lstm_input=None, bidir_ends=False, output_gelu=True):
+        weighted=False, select_by="accuracy", model=None, lstm_input=None, bidir_ends=False, output_gelu=True,
+        use_bones=True, use_gcn=True):
     """
     Trains and returns (best weights, their validation score, validation
     metrics of those weights: accuracy, macro_f1, per-class f1), the best epoch
@@ -284,7 +288,8 @@ def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state
 
     if model is None:
         model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim,
-                                  lstm_input=lstm_input, bidir_ends=bidir_ends, output_gelu=output_gelu)
+                                  lstm_input=lstm_input, bidir_ends=bidir_ends, output_gelu=output_gelu,
+                                  use_bones=use_bones, use_gcn=use_gcn)
         print(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -351,6 +356,9 @@ def main():
                         help="read the backward LSTM at the first time step, the forward one at the last")
     parser.add_argument("--no-output-gelu", dest="output_gelu", action="store_false",
                         help="no GELU on the class scores")
+    parser.add_argument("--no-bones", dest="use_bones", action="store_false", help="drop the bone path")
+    parser.add_argument("--no-gcn", dest="use_gcn", action="store_false",
+                        help="drop the adjacency and graph layer in each path")
     parser.add_argument("--backward-diff", action="store_true",
                         help="velocity as this frame minus the previous, so the window's last frame has motion")
     parser.add_argument("--palm-scale", action="store_true", help="positions in palm lengths instead of pixels")
@@ -379,11 +387,13 @@ def main():
         to_dataset(train_windows, scaler, args.hand_state), to_dataset(val_windows, scaler, args.hand_state), device,
         embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
         lstm_input=args.lstm_input, bidir_ends=args.bidir_ends, output_gelu=args.output_gelu,
+        use_bones=args.use_bones, use_gcn=args.use_gcn,
     )
     config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
-              "output_gelu": args.output_gelu, "csv_left_slot_overrides": args.csv_left_slot[1],
+              "output_gelu": args.output_gelu, "use_bones": args.use_bones, "use_gcn": args.use_gcn,
+              "csv_left_slot_overrides": args.csv_left_slot[1],
               "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands,
               # evaluate.py refuses to score a checkpoint on its own training videos.
               "train_csv_sha256": [file_sha256(data_sources(args.data_dir, name)[1]) for name in VIDEO_NAMES
