@@ -275,3 +275,24 @@ class StrokeBiLSTMModel(nn.Module):
 
         fused = torch.cat(summaries, dim=1)  # (B, 512), or (B, 256) without the bone path
         return self.gelu(self.fc(self.dropout(fused)))  # (B, num_classes)
+
+
+class StrokeGRUModel(nn.Module):
+    """
+    Raw keypoints -> GRU -> last hidden state -> class scores; baselines.py's
+    "gru" row, which matched or beat StrokeBiLSTMModel on this data. Takes the
+    same packed input (B, T, 62, 9) and keeps only the 42 joint slots'
+    positions (channels 0-2); the unused hand's slot is zero. No hand-state input.
+    """
+
+    state_dim = 0  # inference.py passes hand-state features only when this is set
+
+    def __init__(self, num_classes, hidden=64):
+        super().__init__()
+        self.gru = nn.GRU(input_size=42 * 3, hidden_size=hidden, batch_first=True)
+        self.fc = nn.Linear(hidden, num_classes)
+
+    def forward(self, x):
+        B, T = x.shape[:2]
+        _, h = self.gru(x[:, :, :42, :3].reshape(B, T, -1))
+        return self.fc(h[-1])

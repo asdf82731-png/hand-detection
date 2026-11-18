@@ -30,6 +30,7 @@ same model as before; see TRAINING_DESIGN.md):
                               (these two are ablations: which part of the architecture the result needs)
     --backward-diff           velocity = this frame minus the previous, so the last frame has motion (F2)
     --palm-scale              positions in palm lengths, not pixels, so camera distance does not matter (F4)
+    --model gru               baselines.py's GRU instead of the thesis model (no BiLSTM-only options)
     --mirror-hands            mirror the right hand and train both hands on the same weights (F5)
                               (these three: features.window_inputs / extract_hand_tracks)
 
@@ -51,7 +52,7 @@ from data_pipeline import LABELS, build_labeled_windows, load_frame_labels, spli
 from features import (
     FeatureScaler, extract_hand_tracks, pack_model_input, resample_length, window_inputs,
 )
-from model import StrokeBiLSTMModel
+from model import StrokeBiLSTMModel, StrokeGRUModel
 
 VIDEO_NAMES = ["Full", "Down", "Up", "Tab"]
 WINDOW_SIZE = 30
@@ -364,9 +365,19 @@ def main():
     parser.add_argument("--palm-scale", action="store_true", help="positions in palm lengths instead of pixels")
     parser.add_argument("--mirror-hands", action="store_true",
                         help="mirror the right hand into the left-hand slot so both hands share the weights")
+    parser.add_argument("--model", default="bilstm", choices=["bilstm", "gru"],
+                        help="gru = baselines.py's GRU on the joint positions")
     args = parser.parse_args()
     if args.pose_angle and not args.hand_state:
         parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
+    if args.model == "gru":
+        bilstm_only = [flag for flag, used in (
+            ("--embedding", args.embedding != "cumulative"), ("--hand-state", args.hand_state),
+            ("--lstm-input", args.lstm_input is not None), ("--bidir-ends", args.bidir_ends),
+            ("--no-output-gelu", not args.output_gelu), ("--no-bones", not args.use_bones),
+            ("--no-gcn", not args.use_gcn)) if used]
+        if bilstm_only:
+            parser.error(f"{', '.join(bilstm_only)} only apply to the BiLSTM model, not --model gru")
     set_seed(args.seed)
     csv_hand_to_slot = hand_mapping(args.csv_left_slot[0])  # what inference reports as left / right
 
@@ -388,8 +399,9 @@ def main():
         embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
         lstm_input=args.lstm_input, bidir_ends=args.bidir_ends, output_gelu=args.output_gelu,
         use_bones=args.use_bones, use_gcn=args.use_gcn,
+        model=StrokeGRUModel(len(LABELS)) if args.model == "gru" else None,
     )
-    config = {"embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
+    config = {"model": args.model, "embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
               "output_gelu": args.output_gelu, "use_bones": args.use_bones, "use_gcn": args.use_gcn,

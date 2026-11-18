@@ -10,7 +10,7 @@ from features import (
     FeatureScaler, extract_hand_tracks, long_gaps, pack_model_input, resample_to_fps, source_frame_count, video_fps,
     window_inputs,
 )
-from model import StrokeBiLSTMModel
+from model import StrokeBiLSTMModel, StrokeGRUModel
 from pipeline import LABELS
 
 WINDOW_SIZE = 30
@@ -48,7 +48,7 @@ def load_checkpoint(path, device):
     """
     checkpoint = torch.load(path, map_location=device)
     config = checkpoint.get("config", {})
-    model = StrokeBiLSTMModel(
+    model = StrokeGRUModel(num_classes=len(checkpoint["labels"])) if config.get("model") == "gru" else StrokeBiLSTMModel(
         num_classes=len(checkpoint["labels"]),
         embedding=config.get("embedding", "cumulative"),
         state_dim=config.get("state_dim", 0),
