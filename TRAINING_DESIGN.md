@@ -354,12 +354,14 @@ Phase 3 原本列的「讓 DynamicAdjacencyMatrix 真正參與梯度更新」這
 | 混合揮擊分類任務（4.5 節） | `evaluate.py`：對任何有標註的影片（單一或混合動作）逐手、逐種揮擊算次數誤差與事件層級的精確率、召回率、F1，邊界容許 ±3 幀 | 否，但需要混合動作的標註影片 |
 | 進度條、影片播放（4.6.1、4.6.3 節） | 背景工作 API 回報實際進度；頁面可播放所選影片 | 否 |
 
-**建議的 App 版訓練指令**（恢復重新訓練時）：
+**建議的 App 版訓練指令**（2026-11-18 依 5 個種子的比較更新，見 `ROADMAP.md`「修正版 Down 重跑結果」）：
 
 ```
-python train.py --data-dir data --csv-left-slot right --embedding development --hand-state --time-stretch
-python evaluate.py --data-dir <沒用於訓練的影片> --checkpoint multi_motion_model_7class.pt
+python train.py --data-dir data --csv-left-slot right --model gru --palm-scale --out multi_motion_model_7class_gru.pt
+python evaluate.py --data-dir <沒用於訓練的影片> --checkpoint multi_motion_model_7class_gru.pt
 ```
+
+`--model gru` 是 `baselines.py` 的 GRU（只用關節位置），在這份資料上 macro-F1 0.940 ± 0.016，高於論文 BiLSTM 加 `--palm-scale` 的 0.908 ± 0.009。原本建議的 `--embedding development` 反而較差（−0.013），`--hand-state`、`--time-stretch` 在雜訊內。
 
 每個選項應該分開和不加選項的基準比較，一次只開一個，才知道各自有沒有幫助（REV-5、REV-8）。
 

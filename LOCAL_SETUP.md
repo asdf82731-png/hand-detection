@@ -107,6 +107,8 @@ python train.py --data-dir data --csv-left-slot <left 或 right，例外寫成 l
 
 App 版的選項（預設都關閉，說明見 `TRAINING_DESIGN.md` 第 8 節）：`--embedding development`（不受速度影響的 Lie group 嵌入）、`--hand-state`（加入手腕高度與夾角）、`--time-stretch`（訓練時加入快慢不同的版本）。建議一次只開一個，和不加選項的結果比較。
 
+目前比較結果最好的是 `--model gru --palm-scale`（GRU 模型、位置以手掌長度為單位；2026-11-18 的 5 個種子比較見 `ROADMAP.md`）。訓練時加 `--out multi_motion_model_7class_gru.pt` 存成新檔，App 用的舊模型不會被覆寫。
+
 ### 長時間訓練前先檢查
 
 ```
@@ -176,6 +178,7 @@ npm run build
 
 | 變數 | 預設 | 用途 |
 |---|---|---|
+| `MODEL_PATH` | `multi_motion_model_7class.pt` | 服務載入的模型檔，例如 `$env:MODEL_PATH = "multi_motion_model_7class_gru.pt"; uvicorn main:app --port 8000` |
 | `MAX_UPLOAD_MB` | 200 | 上傳影片大小上限 |
 | `MAX_VIDEO_SECONDS` | 600 | 影片長度上限（秒） |
 | `RETENTION_SECONDS` | 3600 | 結果圖片與完成的分析保留多久 |
