@@ -322,6 +322,23 @@ Tab 整支影片都停在低位，但影片內標準化後 `high_mask` 仍切成
 
 架構消融（REV-8，同樣在 `palm_scale` 之上、對 `palm_scale` 比）：`palm_no_bones`（`--no-bones`，拿掉骨骼路徑，只留關節）、`palm_no_gcn`（`--no-gcn`，拿掉每條路徑的鄰接矩陣與圖卷積）。預設模型的參數名稱不變，舊模型檔照常載入。⚠️ 拿掉圖卷積時，LSTM 的輸入從每點 64 維變成 16 維，參數量一起大幅下降（含狀態特徵：434 萬 → 129 萬；拿掉骨骼路徑 → 290 萬；兩者都拿掉 → 83 萬），所以差異可能來自容量而不只是圖結構；`lstm_input_128`（105 萬）在這份資料上分數不變，可作為對照。`run_experiments.py` 沿用同一個輸出資料夾時，已完成的訓練不重跑；舊的 `baselines_seed*.json` 缺新列，會自動重跑。
 
+### 2026-11-18 修正版 Down 重跑結果
+
+`data\Down.csv` 換成修正版（SHA256 `6896a41d…`，原檔留在 `Down_original.csv`），`--csv-left-slot right`，輸出 `experiments_1117`，種子 0–4，17 組全部完成、沒有失敗。基準 macro-F1 0.865 ± 0.028。
+
+| 選項 | Δ macro-F1 | 判讀 |
+|---|---|---|
+| `palm_gru`（`--model gru --palm-scale`） | +0.032 對 `palm_scale`（0.940 ± 0.016） | 最好；F1 tab 0.839 → 0.924、down 0.804 → 0.894（± 0.106） |
+| `palm_scale` | +0.043（0.908 ± 0.009） | 修正 Down 後優勢仍在 |
+| `palm_no_output_gelu`、`palm_lstm_input_128` | +0.006、+0.001 對 `palm_scale` | 雜訊內 |
+| `palm_no_bones`、`palm_no_gcn` | −0.017、−0.044 對 `palm_scale` | 骨骼路徑與圖卷積在 BiLSTM 裡有貢獻 |
+| `class_weights`、`development` | −0.028（對 `select_macro_f1`）、−0.013 | 較差 |
+| 其餘單一選項 | −0.005～+0.017 | 雜訊內 |
+
+- `train.py --model gru` 訓練 `baselines.py` 的 GRU，存成 App 可載入的模型檔（`config.model = "gru"`）；只適用 BiLSTM 的選項會直接報錯。`palm_gru` 的分數與基準列 `gru + palm_scale` 完全相同。
+- 新模型（都沒有覆寫 `multi_motion_model_7class.pt`）：`multi_motion_model_7class_palm.pt`（BiLSTM + palm_scale，最佳驗證準確率 0.943）、`multi_motion_model_7class_gru.pt`（GRU + palm_scale，0.959；tab_stroke 被判成 down_hold 從 41 降到 6 個視窗）。App 用 `MODEL_PATH` 環境變數切換。
+- 仍未解決：`up_stroke` 沒有驗證樣本（訓練也只有 8 個視窗）；`down_stroke` 驗證只有 16 個視窗；Up 右手第 48 幀有一個 stroke-order 警告未處理；還沒用沒參與訓練的影片跑 `evaluate.py`。
+
 ## 同儕審查修訂項目（2026-11-13）
 
 對目前研究設計做了一輪最嚴格標準的模擬同儕審查，完整報告見 `PEER_REVIEW.md`。**決定：退稿（尚未成熟，鼓勵重投）。** 三個阻擋問題：

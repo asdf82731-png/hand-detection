@@ -34,11 +34,11 @@ import os
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from autolabel import label_source
 from data_pipeline import LABEL_TO_INDEX, LABELS, build_labeled_windows, load_frame_labels, parse_frame_id, split_train_val
 from features import FeatureScaler
+from model import StrokeGRUModel as GRUBaseline  # train.py --model gru trains the same model
 from train import (
     VIDEO_NAMES, WINDOW_SIZE, csv_left_slot_spec, data_sources, fit, load_split_windows, macro_f1, set_seed, to_dataset,
 )
@@ -81,24 +81,6 @@ def rule_baseline(data_dir, csv_left_slot, with_type):
             y_true += t
             y_pred += p
     return y_true, y_pred
-
-
-class GRUBaseline(nn.Module):
-    """
-    Raw keypoints -> GRU -> last hidden state -> class scores. Takes the same
-    packed input (B, T, 62, 9) as the thesis model and keeps only the 42
-    joint slots' positions (channels 0-2); the unused hand's slot is zero.
-    """
-
-    def __init__(self, num_classes, hidden=64):
-        super().__init__()
-        self.gru = nn.GRU(input_size=42 * 3, hidden_size=hidden, batch_first=True)
-        self.fc = nn.Linear(hidden, num_classes)
-
-    def forward(self, x):
-        B, T = x.shape[:2]
-        _, h = self.gru(x[:, :, :42, :3].reshape(B, T, -1))
-        return self.fc(h[-1])
 
 
 def scores(y_true, y_pred):

@@ -697,6 +697,26 @@ class TestFeatureOptions(unittest.TestCase):
         old, _, _ = load_checkpoint("multi_motion_model_7class.pt", torch.device("cpu"))
         self.assertEqual((old.backward_diff, old.palm_scale, old.mirror_hands), (False, False, False))
 
+    def test_a_gru_checkpoint_runs_in_the_app_as_the_gru_it_was_trained_as(self):
+        # Built as the BiLSTM, its weights would not load and the app would
+        # fail at startup; predicted with hand-state inputs, the GRU would crash.
+        import os, tempfile
+        from features import FeatureScaler
+        from inference import predict_window_labels
+        from model import StrokeGRUModel
+        scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "m.pt")
+            torch.save({"model_state": StrokeGRUModel(7).state_dict(), "scaler": scaler.state_dict(),
+                        "labels": list(range(7)), "hand_to_slot": {"left": "left", "right": "right"},
+                        "config": {"model": "gru", "palm_scale": True}}, path)
+            loaded, loaded_scaler, _ = load_checkpoint(path, torch.device("cpu"))
+        self.assertIsInstance(loaded, StrokeGRUModel)
+        self.assertTrue(loaded.palm_scale)
+        positions = np.random.default_rng(0).random((35, 21, 3)).astype(np.float32)
+        labels = predict_window_labels(positions, "left", loaded, loaded_scaler, torch.device("cpu"))
+        self.assertEqual(len(labels), 35 - 29)
+
 
 class TestStrokeTimes(unittest.TestCase):
     def test_spans_become_seconds_from_the_start(self):
