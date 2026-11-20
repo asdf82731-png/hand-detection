@@ -57,6 +57,7 @@ def load_checkpoint(path, device):
         output_gelu=config.get("output_gelu", True),
         use_bones=config.get("use_bones", True),
         use_gcn=config.get("use_gcn", True),
+        adjacency=config.get("adjacency", "similarity"),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()

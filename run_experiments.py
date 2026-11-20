@@ -59,6 +59,8 @@ EXPERIMENTS = [
     # Ablations on top of palm_scale: does the result need the bone path, the graph layer?
     ("palm_no_bones", ["--no-bones", "--palm-scale"]),
     ("palm_no_gcn", ["--no-gcn", "--palm-scale"]),
+    # Is the learned adjacency worth having over the hand skeleton itself? Same graph layer, fixed edges.
+    ("palm_fixed_adj", ["--adjacency", "fixed", "--palm-scale"]),
     # baselines.py's "gru + palm_scale" beat every BiLSTM row (2026-11-18);
     # trained here it gets per-class F1 and a checkpoint the app can load.
     ("palm_gru", ["--model", "gru", "--palm-scale"]),
@@ -68,7 +70,7 @@ EXPERIMENTS = [
 # would be credited to the weights.
 COMPARED_WITH = {"class_weights": "select_macro_f1", "palm_no_output_gelu": "palm_scale",
                  "palm_lstm_input_128": "palm_scale", "palm_no_bones": "palm_scale", "palm_no_gcn": "palm_scale",
-                 "palm_gru": "palm_scale"}
+                 "palm_gru": "palm_scale", "palm_fixed_adj": "palm_scale"}
 # baselines.py rows a baselines_seed*.json must hold to count as done: a file
 # written before a row existed is redone instead of silently lacking it.
 BASELINE_ROWS = ("majority", "rule", "rule + type", "gru", "gru + palm_scale")

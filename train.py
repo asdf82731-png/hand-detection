@@ -30,6 +30,7 @@ same model as before; see TRAINING_DESIGN.md):
                               (these two are ablations: which part of the architecture the result needs)
     --backward-diff           velocity = this frame minus the previous, so the last frame has motion (F2)
     --palm-scale              positions in palm lengths, not pixels, so camera distance does not matter (F4)
+    --adjacency fixed         the hand skeleton as the graph's adjacency instead of one learned per sample
     --model gru               baselines.py's GRU instead of the thesis model (no BiLSTM-only options)
     --mirror-hands            mirror the right hand and train both hands on the same weights (F5)
                               (these three: features.window_inputs / extract_hand_tracks)
@@ -276,7 +277,7 @@ def macro_f1(y_true, y_pred):
 
 def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
         weighted=False, select_by="accuracy", model=None, lstm_input=None, bidir_ends=False, output_gelu=True,
-        use_bones=True, use_gcn=True):
+        use_bones=True, use_gcn=True, adjacency="similarity"):
     """
     Trains and returns (best weights, their validation score, validation
     metrics of those weights: accuracy, macro_f1, per-class f1), the best epoch
@@ -290,7 +291,7 @@ def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state
     if model is None:
         model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim,
                                   lstm_input=lstm_input, bidir_ends=bidir_ends, output_gelu=output_gelu,
-                                  use_bones=use_bones, use_gcn=use_gcn)
+                                  use_bones=use_bones, use_gcn=use_gcn, adjacency=adjacency)
         print(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -360,6 +361,8 @@ def main():
     parser.add_argument("--no-bones", dest="use_bones", action="store_false", help="drop the bone path")
     parser.add_argument("--no-gcn", dest="use_gcn", action="store_false",
                         help="drop the adjacency and graph layer in each path")
+    parser.add_argument("--adjacency", default="similarity", choices=["similarity", "fixed"],
+                        help="fixed = the hand skeleton, nothing learned; similarity = learned from each sample")
     parser.add_argument("--backward-diff", action="store_true",
                         help="velocity as this frame minus the previous, so the window's last frame has motion")
     parser.add_argument("--palm-scale", action="store_true", help="positions in palm lengths instead of pixels")
@@ -370,12 +373,14 @@ def main():
     args = parser.parse_args()
     if args.pose_angle and not args.hand_state:
         parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
+    if args.adjacency == "fixed" and not args.use_gcn:
+        parser.error("--adjacency fixed needs the graph layer, which --no-gcn drops")
     if args.model == "gru":
         bilstm_only = [flag for flag, used in (
             ("--embedding", args.embedding != "cumulative"), ("--hand-state", args.hand_state),
             ("--lstm-input", args.lstm_input is not None), ("--bidir-ends", args.bidir_ends),
             ("--no-output-gelu", not args.output_gelu), ("--no-bones", not args.use_bones),
-            ("--no-gcn", not args.use_gcn)) if used]
+            ("--no-gcn", not args.use_gcn), ("--adjacency", args.adjacency != "similarity")) if used]
         if bilstm_only:
             parser.error(f"{', '.join(bilstm_only)} only apply to the BiLSTM model, not --model gru")
     set_seed(args.seed)
@@ -398,13 +403,14 @@ def main():
         to_dataset(train_windows, scaler, args.hand_state), to_dataset(val_windows, scaler, args.hand_state), device,
         embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
         lstm_input=args.lstm_input, bidir_ends=args.bidir_ends, output_gelu=args.output_gelu,
-        use_bones=args.use_bones, use_gcn=args.use_gcn,
+        use_bones=args.use_bones, use_gcn=args.use_gcn, adjacency=args.adjacency,
         model=StrokeGRUModel(len(LABELS)) if args.model == "gru" else None,
     )
     config = {"model": args.model, "embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
               "output_gelu": args.output_gelu, "use_bones": args.use_bones, "use_gcn": args.use_gcn,
+              "adjacency": args.adjacency,
               "csv_left_slot_overrides": args.csv_left_slot[1],
               "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands,
               # evaluate.py refuses to score a checkpoint on its own training videos.

@@ -151,6 +151,39 @@ class SimilarityAdjacency(nn.Module):
         return torch.softmax(H @ H.transpose(-1, -2), dim=-1)  # (B, N, N)
 
 
+class FixedAdjacency(nn.Module):
+    """
+    The hand's own skeleton as the adjacency, the same for every sample and
+    with nothing to train: (A + I) with each row divided by its sum, so each
+    node averages itself and its neighbours (the control for SimilarityAdjacency,
+    which learns who is connected from the sample).
+    """
+
+    def __init__(self, edges, num_nodes):
+        super(FixedAdjacency, self).__init__()
+        A = torch.eye(num_nodes)
+        for i, j in edges:
+            A[i, j] = A[j, i] = 1.0
+        self.register_buffer("A", A / A.sum(dim=-1, keepdim=True))
+
+    def forward(self, X):
+        return self.A.expand(X.shape[0], -1, -1)  # (B, N, N)
+
+
+def skeleton_edges():
+    """
+    (joint edges over the 42 joint nodes, bone edges over the 20 bone nodes).
+    Joints 0-20 and 21-41 are the two hand slots, each with the hand's bones
+    between its joints; the slots are not joined. Two bones are neighbours
+    when they share a joint.
+    """
+    from pipeline import BONE_CONNECTIONS  # here, not at the top: pipeline needs mediapipe
+    joints = [(a + slot, b + slot) for slot in (0, 21) for a, b in BONE_CONNECTIONS]
+    bones = [(i, j) for i, (a, b) in enumerate(BONE_CONNECTIONS) for j, (c, d) in enumerate(BONE_CONNECTIONS)
+             if i < j and {a, b} & {c, d}]
+    return joints, bones
+
+
 class ResidualGCNLayer(nn.Module):
     """Aggregate over the adjacency, 1x1 conv, residual + ReLU, then BatchNorm + ReLU (thesis 3.6.3-3.6.6)."""
 
@@ -180,7 +213,8 @@ class StrokeBiLSTMModel(nn.Module):
     EMBEDDINGS = ("cumulative", "development")
 
     def __init__(self, num_classes, embedding="cumulative", state_dim=0,
-                 lstm_input=None, bidir_ends=False, output_gelu=True, use_bones=True, use_gcn=True):
+                 lstm_input=None, bidir_ends=False, output_gelu=True, use_bones=True, use_gcn=True,
+                 adjacency="similarity"):
         """
         embedding: "cumulative" (linear map summed over frames; what existing
         checkpoints use) or "development" (PathDevelopment, the speed-invariant
@@ -209,6 +243,9 @@ class StrokeBiLSTMModel(nn.Module):
             LSTM); the classifier then reads the joint path alone.
         use_gcn: False drops each path's adjacency and graph layer, so the
             embedding's 16 features per node go straight to the LSTM.
+        adjacency: "similarity" (the thesis: learned from each sample's node
+            embeddings) or "fixed" (the hand skeleton, nothing learned). Only
+            this differs between the two; the graph layer is the same.
         """
         super(StrokeBiLSTMModel, self).__init__()
         if embedding not in self.EMBEDDINGS:
@@ -216,6 +253,11 @@ class StrokeBiLSTMModel(nn.Module):
         self.embedding, self.state_dim = embedding, state_dim
         self.lstm_input, self.bidir_ends, self.output_gelu = lstm_input, bidir_ends, output_gelu
         self.use_bones, self.use_gcn = use_bones, use_gcn
+        if adjacency not in ("similarity", "fixed"):
+            raise ValueError(f"adjacency must be 'similarity' or 'fixed', got {adjacency!r}")
+        self.adjacency = adjacency
+        if adjacency == "fixed":
+            joint_edges, bone_edges = skeleton_edges()
 
         def embed():
             return CumulativeEmbedding(input_dim=9, embed_dim=16) if embedding == "cumulative" else PathDevelopment()
@@ -229,7 +271,8 @@ class StrokeBiLSTMModel(nn.Module):
 
         self.lie_embed_joint = embed()
         if use_gcn:
-            self.adj_joint = SimilarityAdjacency(input_dim=16, embed_dim=32)
+            self.adj_joint = (FixedAdjacency(joint_edges, 42) if adjacency == "fixed"
+                              else SimilarityAdjacency(input_dim=16, embed_dim=32))
             self.gcn_joint = ResidualGCNLayer(in_channels=16, out_channels=64)
         self.proj_joint = project(42)
         self.lstm_joint = nn.LSTM(input_size=path_size[42] + state_dim, hidden_size=128, batch_first=True,
@@ -238,7 +281,8 @@ class StrokeBiLSTMModel(nn.Module):
         if use_bones:
             self.lie_embed_bone = embed()
             if use_gcn:
-                self.adj_bone = SimilarityAdjacency(input_dim=16, embed_dim=32)
+                self.adj_bone = (FixedAdjacency(bone_edges, 20) if adjacency == "fixed"
+                                 else SimilarityAdjacency(input_dim=16, embed_dim=32))
                 self.gcn_bone = ResidualGCNLayer(in_channels=16, out_channels=64)
             self.proj_bone = project(20)
             self.lstm_bone = nn.LSTM(input_size=path_size[20], hidden_size=128, batch_first=True, bidirectional=True)

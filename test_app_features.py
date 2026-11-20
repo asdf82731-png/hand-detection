@@ -144,6 +144,30 @@ class TestArchitectureFixes(unittest.TestCase):
             out = model.eval()(torch.randn(2, 30, 62, 9), torch.randn(2, 30, 6) if model.state_dim else None)
             self.assertEqual(out.shape, (2, 7))
 
+    def test_fixed_adjacency_is_the_hand_skeleton_and_trains_nothing(self):
+        # The control for the learned adjacency: it must carry the finger
+        # structure (so a difference in score is about learning vs knowing the
+        # skeleton), join nothing across the two hand slots, and add no weights.
+        from model import StrokeBiLSTMModel
+        count = lambda m: sum(p.numel() for p in m.parameters())
+        learned, fixed = StrokeBiLSTMModel(7), StrokeBiLSTMModel(7, adjacency="fixed")
+        self.assertEqual(count(learned) - count(fixed), count(learned.adj_joint) + count(learned.adj_bone))
+        self.assertEqual(sum(p.numel() for p in fixed.adj_joint.parameters()), 0)
+        A = fixed.adj_joint(torch.zeros(2, 30, 42, 16))
+        self.assertEqual(A.shape, (2, 42, 42))
+        self.assertTrue(torch.allclose(A.sum(-1), torch.ones(2, 42)))
+        self.assertGreater(A[0, 0, 1].item(), 0)       # wrist - thumb base
+        self.assertEqual(A[0, 1, 5].item(), 0)         # two finger bases are only joined through the wrist
+        self.assertEqual(A[0, :21, 21:].abs().sum().item(), 0)  # left slot never mixes with the right
+        bones = fixed.adj_bone(torch.zeros(2, 30, 20, 16))[0]
+        self.assertGreater(bones[0, 1].item(), 0)      # thumb bones 0 and 1 share a joint
+        self.assertGreater(bones[0, 4].item(), 0)      # bones 0 (0-1) and 4 (0-5) share the wrist
+        self.assertEqual(bones[1, 5].item(), 0)        # (1-2) and (5-6) share nothing
+        out = fixed.eval()(torch.randn(2, 30, 62, 9))
+        self.assertEqual(out.shape, (2, 7))
+        self.assertNotIn("adj_joint.node_fc.weight", fixed.state_dict())
+        self.assertIn("adj_joint.A", fixed.state_dict())
+
     def test_the_full_model_keeps_the_parameter_names_old_checkpoints_use(self):
         # The ablations add no parameters to the default model, so every
         # existing checkpoint still loads into it.
@@ -158,7 +182,8 @@ class TestArchitectureFixes(unittest.TestCase):
         import os, tempfile
         from features import FeatureScaler
         from model import StrokeBiLSTMModel
-        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False, "use_bones": False, "use_gcn": False}
+        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False, "use_bones": False, "use_gcn": True,
+                  "adjacency": "fixed"}
         model = StrokeBiLSTMModel(7, **config)
         scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
         with tempfile.TemporaryDirectory() as folder:
@@ -167,7 +192,7 @@ class TestArchitectureFixes(unittest.TestCase):
                         "hand_to_slot": {"left": "left", "right": "right"}, "config": config}, path)
             loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
         self.assertEqual((loaded.lstm_input, loaded.bidir_ends, loaded.output_gelu), (128, True, False))
-        self.assertEqual((loaded.use_bones, loaded.use_gcn), (False, False))
+        self.assertEqual((loaded.use_bones, loaded.use_gcn, loaded.adjacency), (False, True, "fixed"))
 
 
 def _raw_hand(wrist_y, palm=(0.0, -50.0), scale=1.0):
