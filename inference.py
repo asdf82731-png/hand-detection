@@ -58,6 +58,8 @@ def load_checkpoint(path, device):
         use_bones=config.get("use_bones", True),
         use_gcn=config.get("use_gcn", True),
         adjacency=config.get("adjacency", "similarity"),
+        gcn_form=config.get("gcn_form", "default"),
+        adj_input=config.get("adj_input", "embedded"),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()

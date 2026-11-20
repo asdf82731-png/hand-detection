@@ -30,6 +30,8 @@ same model as before; see TRAINING_DESIGN.md):
                               (these two are ablations: which part of the architecture the result needs)
     --backward-diff           velocity = this frame minus the previous, so the last frame has motion (F2)
     --palm-scale              positions in palm lengths, not pixels, so camera distance does not matter (F4)
+    --gcn-form thesis         the graph layer's ReLU where equation 3.15 puts it (before the residual add)
+    --adj-input raw           learn the adjacency from the window's raw 9 features (thesis 3.6.2), not the embedding
     --adjacency fixed         the hand skeleton as the graph's adjacency instead of one learned per sample
     --model gru               baselines.py's GRU instead of the thesis model (no BiLSTM-only options)
     --mirror-hands            mirror the right hand and train both hands on the same weights (F5)
@@ -277,7 +279,7 @@ def macro_f1(y_true, y_pred):
 
 def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state_dim=0,
         weighted=False, select_by="accuracy", model=None, lstm_input=None, bidir_ends=False, output_gelu=True,
-        use_bones=True, use_gcn=True, adjacency="similarity"):
+        use_bones=True, use_gcn=True, adjacency="similarity", gcn_form="default", adj_input="embedded"):
     """
     Trains and returns (best weights, their validation score, validation
     metrics of those weights: accuracy, macro_f1, per-class f1), the best epoch
@@ -291,7 +293,8 @@ def fit(train_set, val_set, device, epochs=EPOCHS, embedding="cumulative", state
     if model is None:
         model = StrokeBiLSTMModel(num_classes=len(LABELS), embedding=embedding, state_dim=state_dim,
                                   lstm_input=lstm_input, bidir_ends=bidir_ends, output_gelu=output_gelu,
-                                  use_bones=use_bones, use_gcn=use_gcn, adjacency=adjacency)
+                                  use_bones=use_bones, use_gcn=use_gcn, adjacency=adjacency,
+                                  gcn_form=gcn_form, adj_input=adj_input)
         print(f"model parameters: {sum(p.numel() for p in model.parameters()):,}")
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
@@ -363,6 +366,10 @@ def main():
                         help="drop the adjacency and graph layer in each path")
     parser.add_argument("--adjacency", default="similarity", choices=["similarity", "fixed"],
                         help="fixed = the hand skeleton, nothing learned; similarity = learned from each sample")
+    parser.add_argument("--gcn-form", default="default", choices=["default", "thesis"],
+                        help="thesis = ReLU before the residual add, as equation 3.15 is written")
+    parser.add_argument("--adj-input", default="embedded", choices=["embedded", "raw"],
+                        help="raw = adjacency from the window's 9 features (thesis 3.6.2); embedded = from the embedding")
     parser.add_argument("--backward-diff", action="store_true",
                         help="velocity as this frame minus the previous, so the window's last frame has motion")
     parser.add_argument("--palm-scale", action="store_true", help="positions in palm lengths instead of pixels")
@@ -373,14 +380,21 @@ def main():
     args = parser.parse_args()
     if args.pose_angle and not args.hand_state:
         parser.error("--pose-angle changes the hand-state features, so it needs --hand-state")
-    if args.adjacency == "fixed" and not args.use_gcn:
-        parser.error("--adjacency fixed needs the graph layer, which --no-gcn drops")
+    if not args.use_gcn:
+        graph_only = [flag for flag, used in (("--adjacency fixed", args.adjacency == "fixed"),
+                                              ("--gcn-form", args.gcn_form != "default"),
+                                              ("--adj-input", args.adj_input != "embedded")) if used]
+        if graph_only:
+            parser.error(f"{', '.join(graph_only)} need the graph layer, which --no-gcn drops")
+    if args.adjacency == "fixed" and args.adj_input != "embedded":
+        parser.error("--adj-input only applies to the learned adjacency, not --adjacency fixed")
     if args.model == "gru":
         bilstm_only = [flag for flag, used in (
             ("--embedding", args.embedding != "cumulative"), ("--hand-state", args.hand_state),
             ("--lstm-input", args.lstm_input is not None), ("--bidir-ends", args.bidir_ends),
             ("--no-output-gelu", not args.output_gelu), ("--no-bones", not args.use_bones),
-            ("--no-gcn", not args.use_gcn), ("--adjacency", args.adjacency != "similarity")) if used]
+            ("--no-gcn", not args.use_gcn), ("--adjacency", args.adjacency != "similarity"),
+            ("--gcn-form", args.gcn_form != "default"), ("--adj-input", args.adj_input != "embedded")) if used]
         if bilstm_only:
             parser.error(f"{', '.join(bilstm_only)} only apply to the BiLSTM model, not --model gru")
     set_seed(args.seed)
@@ -404,13 +418,14 @@ def main():
         embedding=args.embedding, state_dim=state_dim, weighted=args.class_weights, select_by=args.select_by,
         lstm_input=args.lstm_input, bidir_ends=args.bidir_ends, output_gelu=args.output_gelu,
         use_bones=args.use_bones, use_gcn=args.use_gcn, adjacency=args.adjacency,
+        gcn_form=args.gcn_form, adj_input=args.adj_input,
         model=StrokeGRUModel(len(LABELS)) if args.model == "gru" else None,
     )
     config = {"model": args.model, "embedding": args.embedding, "state_dim": state_dim, "time_stretch": args.time_stretch,
               "class_weights": args.class_weights, "select_by": args.select_by, "seed": args.seed,
               "pose_angle": args.pose_angle, "lstm_input": args.lstm_input, "bidir_ends": args.bidir_ends,
               "output_gelu": args.output_gelu, "use_bones": args.use_bones, "use_gcn": args.use_gcn,
-              "adjacency": args.adjacency,
+              "adjacency": args.adjacency, "gcn_form": args.gcn_form, "adj_input": args.adj_input,
               "csv_left_slot_overrides": args.csv_left_slot[1],
               "backward_diff": args.backward_diff, "palm_scale": args.palm_scale, "mirror_hands": args.mirror_hands,
               # evaluate.py refuses to score a checkpoint on its own training videos.

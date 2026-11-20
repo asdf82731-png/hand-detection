@@ -185,10 +185,20 @@ def skeleton_edges():
 
 
 class ResidualGCNLayer(nn.Module):
-    """Aggregate over the adjacency, 1x1 conv, residual + ReLU, then BatchNorm + ReLU (thesis 3.6.3-3.6.6)."""
+    """
+    Aggregate over the adjacency, 1x1 conv, residual, then BatchNorm + ReLU
+    (thesis 3.6.3-3.6.6). form "default" puts the ReLU after the residual sum
+    (relu(A.conv(x) + res(x))); form "thesis" follows equation 3.15 as written,
+    H = relu(A.conv(x)) + res(x), the residual added after the activation.
+    Aggregating before or after the 1x1 conv is the same thing, because every
+    row of A sums to 1.
+    """
 
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, form="default"):
         super(ResidualGCNLayer, self).__init__()
+        if form not in ("default", "thesis"):
+            raise ValueError(f"form must be 'default' or 'thesis', got {form!r}")
+        self.form = form
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1))
         self.residual_conv = nn.Conv2d(in_channels, out_channels, kernel_size=(1, 1))
         self.bn = nn.BatchNorm2d(out_channels)
@@ -197,7 +207,10 @@ class ResidualGCNLayer(nn.Module):
     def forward(self, x, A):
         aggregated = torch.einsum('bnm,btmf->btnf', A, x).permute(0, 3, 1, 2)  # (B, C, T, N)
         residual = self.residual_conv(x.permute(0, 3, 1, 2))
-        out = self.relu(self.conv(aggregated) + residual)
+        if self.form == "thesis":
+            out = self.relu(self.conv(aggregated)) + residual
+        else:
+            out = self.relu(self.conv(aggregated) + residual)
         out = self.relu(self.bn(out))
         return out.permute(0, 2, 3, 1)  # (B, T, N, C)
 
@@ -214,7 +227,7 @@ class StrokeBiLSTMModel(nn.Module):
 
     def __init__(self, num_classes, embedding="cumulative", state_dim=0,
                  lstm_input=None, bidir_ends=False, output_gelu=True, use_bones=True, use_gcn=True,
-                 adjacency="similarity"):
+                 adjacency="similarity", gcn_form="default", adj_input="embedded"):
         """
         embedding: "cumulative" (linear map summed over frames; what existing
         checkpoints use) or "development" (PathDevelopment, the speed-invariant
@@ -246,6 +259,13 @@ class StrokeBiLSTMModel(nn.Module):
         adjacency: "similarity" (the thesis: learned from each sample's node
             embeddings) or "fixed" (the hand skeleton, nothing learned). Only
             this differs between the two; the graph layer is the same.
+        gcn_form: "default" or "thesis", where the graph layer puts its ReLU
+            (see ResidualGCNLayer; equation 3.15 of the thesis).
+        adj_input: what the learned adjacency is computed from: "embedded"
+            (the cumulative embedding's output, 16 features per node, the
+            default) or "raw" (the window's own 9 features per node, which is
+            what thesis 3.6.2 says; the thesis's 3.6 overview says the
+            embedded ones).
         """
         super(StrokeBiLSTMModel, self).__init__()
         if embedding not in self.EMBEDDINGS:
@@ -256,6 +276,10 @@ class StrokeBiLSTMModel(nn.Module):
         if adjacency not in ("similarity", "fixed"):
             raise ValueError(f"adjacency must be 'similarity' or 'fixed', got {adjacency!r}")
         self.adjacency = adjacency
+        if adj_input not in ("embedded", "raw"):
+            raise ValueError(f"adj_input must be 'embedded' or 'raw', got {adj_input!r}")
+        self.gcn_form, self.adj_input = gcn_form, adj_input
+        adj_features = 16 if adj_input == "embedded" else 9
         if adjacency == "fixed":
             joint_edges, bone_edges = skeleton_edges()
 
@@ -272,8 +296,8 @@ class StrokeBiLSTMModel(nn.Module):
         self.lie_embed_joint = embed()
         if use_gcn:
             self.adj_joint = (FixedAdjacency(joint_edges, 42) if adjacency == "fixed"
-                              else SimilarityAdjacency(input_dim=16, embed_dim=32))
-            self.gcn_joint = ResidualGCNLayer(in_channels=16, out_channels=64)
+                              else SimilarityAdjacency(input_dim=adj_features, embed_dim=32))
+            self.gcn_joint = ResidualGCNLayer(in_channels=16, out_channels=64, form=gcn_form)
         self.proj_joint = project(42)
         self.lstm_joint = nn.LSTM(input_size=path_size[42] + state_dim, hidden_size=128, batch_first=True,
                                   bidirectional=True)
@@ -282,8 +306,8 @@ class StrokeBiLSTMModel(nn.Module):
             self.lie_embed_bone = embed()
             if use_gcn:
                 self.adj_bone = (FixedAdjacency(bone_edges, 20) if adjacency == "fixed"
-                                 else SimilarityAdjacency(input_dim=16, embed_dim=32))
-                self.gcn_bone = ResidualGCNLayer(in_channels=16, out_channels=64)
+                                 else SimilarityAdjacency(input_dim=adj_features, embed_dim=32))
+                self.gcn_bone = ResidualGCNLayer(in_channels=16, out_channels=64, form=gcn_form)
             self.proj_bone = project(20)
             self.lstm_bone = nn.LSTM(input_size=path_size[20], hidden_size=128, batch_first=True, bidirectional=True)
 
@@ -303,7 +327,8 @@ class StrokeBiLSTMModel(nn.Module):
 
         x_joint = self.lie_embed_joint(x[:, :, :42, :])  # (B, T, 42, 16)
         if self.use_gcn:
-            x_joint = self.gcn_joint(x_joint, self.adj_joint(x_joint))  # (B, T, 42, 64)
+            raw = x[:, :, :42, :] if self.adj_input == "raw" else x_joint
+            x_joint = self.gcn_joint(x_joint, self.adj_joint(raw))  # (B, T, 42, 64)
         x_joint = self.proj_joint(x_joint.reshape(B, T, -1))
         if self.state_dim:
             x_joint = torch.cat([x_joint, state], dim=-1)
@@ -313,7 +338,8 @@ class StrokeBiLSTMModel(nn.Module):
         if self.use_bones:
             x_bone = self.lie_embed_bone(x[:, :, 42:, :])  # (B, T, 20, 16)
             if self.use_gcn:
-                x_bone = self.gcn_bone(x_bone, self.adj_bone(x_bone))  # (B, T, 20, 64)
+                raw = x[:, :, 42:, :] if self.adj_input == "raw" else x_bone
+                x_bone = self.gcn_bone(x_bone, self.adj_bone(raw))  # (B, T, 20, 64)
             out_bone, _ = self.lstm_bone(self.proj_bone(x_bone.reshape(B, T, -1)))  # (B, T, 256)
             summaries.append(self._summary(out_bone))
 

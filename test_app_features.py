@@ -168,6 +168,38 @@ class TestArchitectureFixes(unittest.TestCase):
         self.assertNotIn("adj_joint.node_fc.weight", fixed.state_dict())
         self.assertIn("adj_joint.A", fixed.state_dict())
 
+    def test_thesis_graph_layer_is_equation_3_15(self):
+        # Equation 3.15 is H = relu(A . conv(H)) + H_residual: the activation
+        # sits before the residual add, so with a negative residual the output
+        # is negative before the batch norm. In the default layer the ReLU is
+        # after the sum, so a large enough residual can cancel the branch.
+        from model import ResidualGCNLayer
+        x = torch.randn(2, 5, 4, 3)
+        A = torch.softmax(torch.randn(2, 4, 4), dim=-1)
+        layer = ResidualGCNLayer(3, 6, form="thesis").eval()
+        branch = torch.relu(layer.conv(torch.einsum("bnm,btmf->btnf", A, x).permute(0, 3, 1, 2)))
+        expected = torch.relu(layer.bn(branch + layer.residual_conv(x.permute(0, 3, 1, 2)))).permute(0, 2, 3, 1)
+        self.assertTrue(torch.allclose(layer(x, A), expected, atol=1e-6))
+        default = ResidualGCNLayer(3, 6, form="default").eval()
+        default.load_state_dict(layer.state_dict())
+        self.assertFalse(torch.allclose(default(x, A), layer(x, A), atol=1e-4), "the two forms are not the same layer")
+        with self.assertRaises(ValueError):
+            ResidualGCNLayer(3, 6, form="nope")
+
+    def test_raw_adjacency_input_reads_the_windows_own_features(self):
+        # thesis 3.6.2 computes the adjacency from the window's 9 features, so
+        # it has to shrink the node embedding's input to 9 and must not change
+        # when only the embedding's weights do.
+        from model import StrokeBiLSTMModel
+        raw = StrokeBiLSTMModel(7, adj_input="raw", gcn_form="thesis")
+        default = StrokeBiLSTMModel(7)
+        self.assertEqual(raw.adj_joint.node_fc.in_features, 9)
+        self.assertEqual(default.adj_joint.node_fc.in_features, 16)
+        x = torch.randn(2, 30, 62, 9)
+        self.assertEqual(raw.eval()(x).shape, (2, 7))
+        with self.assertRaises(ValueError):
+            StrokeBiLSTMModel(7, adj_input="nope")
+
     def test_the_full_model_keeps_the_parameter_names_old_checkpoints_use(self):
         # The ablations add no parameters to the default model, so every
         # existing checkpoint still loads into it.
@@ -182,17 +214,20 @@ class TestArchitectureFixes(unittest.TestCase):
         import os, tempfile
         from features import FeatureScaler
         from model import StrokeBiLSTMModel
-        config = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False, "use_bones": False, "use_gcn": True,
-                  "adjacency": "fixed"}
-        model = StrokeBiLSTMModel(7, **config)
+        learned = {"lstm_input": 128, "bidir_ends": True, "output_gelu": False, "use_bones": False, "use_gcn": True,
+                   "adjacency": "similarity", "gcn_form": "thesis", "adj_input": "raw"}
+        fixed = {"adjacency": "fixed", "gcn_form": "default", "adj_input": "embedded"}
         scaler = FeatureScaler(*[np.zeros(9, dtype=np.float32)] * 4)
-        with tempfile.TemporaryDirectory() as folder:
-            path = os.path.join(folder, "m.pt")
-            torch.save({"model_state": model.state_dict(), "scaler": scaler.state_dict(), "labels": list(range(7)),
-                        "hand_to_slot": {"left": "left", "right": "right"}, "config": config}, path)
-            loaded, _, _ = load_checkpoint(path, torch.device("cpu"))
-        self.assertEqual((loaded.lstm_input, loaded.bidir_ends, loaded.output_gelu), (128, True, False))
-        self.assertEqual((loaded.use_bones, loaded.use_gcn, loaded.adjacency), (False, True, "fixed"))
+        for config in (learned, fixed):
+            model = StrokeBiLSTMModel(7, **config)
+            with tempfile.TemporaryDirectory() as folder:
+                path = os.path.join(folder, "m.pt")
+                torch.save({"model_state": model.state_dict(), "scaler": scaler.state_dict(), "labels": list(range(7)),
+                            "hand_to_slot": {"left": "left", "right": "right"}, "config": config}, path)
+                loaded, _, _ = load_checkpoint(path, torch.device("cpu"))  # strict load: wrong shapes would raise
+            for key, default in (("lstm_input", None), ("bidir_ends", False), ("output_gelu", True), ("use_bones", True),
+                                 ("use_gcn", True), ("adjacency", None), ("gcn_form", None), ("adj_input", None)):
+                self.assertEqual(getattr(loaded, key), config.get(key, default), key)
 
 
 def _raw_hand(wrist_y, palm=(0.0, -50.0), scale=1.0):

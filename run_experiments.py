@@ -61,6 +61,10 @@ EXPERIMENTS = [
     ("palm_no_gcn", ["--no-gcn", "--palm-scale"]),
     # Is the learned adjacency worth having over the hand skeleton itself? Same graph layer, fixed edges.
     ("palm_fixed_adj", ["--adjacency", "fixed", "--palm-scale"]),
+    # The two places where the thesis text differs from the default layer, one at a time and on
+    # pixel coordinates like the thesis, so each is compared with "baseline".
+    ("thesis_gcn_form", ["--gcn-form", "thesis"]),      # equation 3.15: ReLU before the residual add
+    ("thesis_adj_input", ["--adj-input", "raw"]),       # section 3.6.2: adjacency from the 9 raw features
     # baselines.py's "gru + palm_scale" beat every BiLSTM row (2026-11-18);
     # trained here it gets per-class F1 and a checkpoint the app can load.
     ("palm_gru", ["--model", "gru", "--palm-scale"]),
