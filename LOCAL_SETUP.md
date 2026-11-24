@@ -119,6 +119,8 @@ python preflight.py --data-dir data --out-dir experiments_1117
 
 `run_experiments.py` 開跑前會自己執行這些檢查，有 ERROR 就直接停下、什麼都不啟動。想故意只用部分影片訓練時，加 `--skip-preflight`。
 
+也可以用 `sop.py` 一次跑完（先 preflight、再 `run_experiments.py`，任一階段失敗就停；其他參數原樣交給 `run_experiments.py`）：`python sop.py --data-dir data --csv-left-slot <同上> --seeds 0 1 2 3 4`。`--csv-left-slot` 一定要自己給：它沒有預設，也不會自動採用 `check_data.py` 的建議，要先用預覽圖確認。
+
 ### 一次比較所有選項
 
 ```
