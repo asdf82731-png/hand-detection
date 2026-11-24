@@ -117,6 +117,8 @@ python preflight.py --data-dir data --out-dir experiments_1117
 
 幾秒鐘跑完，不改任何東西。它檢查：套件和 GPU、四支影片的標籤檔與畫面都在、幀編號對得上、標籤讀得進去、**停頓沒有被讀成 none**（2026-11-16 那輪的 Down.csv 就是這樣）、有揮擊的影片也有停頓、影片不是幾乎全是 none（動作沒標）、揮擊順序（`check_labels.py`）、硬碟空間。**ERROR 要先修掉才開始訓練**；WARNING 是給人看的。
 
+`run_experiments.py` 開跑前會自己執行這些檢查，有 ERROR 就直接停下、什麼都不啟動。想故意只用部分影片訓練時，加 `--skip-preflight`。
+
 ### 一次比較所有選項
 
 ```

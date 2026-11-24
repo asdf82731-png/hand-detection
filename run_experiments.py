@@ -15,6 +15,9 @@ run can be restarted with the same command; delete the file to redo it.
 --out-dir remembers the --data-dir and --csv-left-slot it was started with
 (settings.json) and refuses others, so its table never mixes models trained
 on different data or hand mappings.
+Before anything starts, preflight.py's checks run and any ERROR stops the run
+(the 2026-11-16 run trained for hours on a Down.csv with its holds read as
+"none"). To train on only some of the videos on purpose, pass --skip-preflight.
 Each train.py run reads the videos and detects the hands again, so one run
 takes minutes: 16 experiments x 5 seeds is a long job.
 
@@ -23,7 +26,6 @@ rows can be noise; use several seeds and trust only differences larger than
 the spread across seeds (TRAINING_DESIGN.md, REV-7).
 """
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -32,7 +34,8 @@ import sys
 import numpy as np
 import torch
 
-from train import VIDEO_NAMES, csv_left_slot_spec, data_sources
+from preflight import print_findings, run_checks
+from workflow.data_setup import VIDEO_NAMES, csv_left_slot_spec, data_sources, file_sha256
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -114,8 +117,7 @@ def run_settings(data_dir, spec):
     for name in VIDEO_NAMES:
         csv_path = data_sources(data_dir, name)[1]
         if os.path.exists(csv_path):
-            with open(csv_path, "rb") as f:
-                hashes[name] = hashlib.sha256(f.read()).hexdigest()
+            hashes[name] = file_sha256(csv_path)
     return {"data_dir": os.path.abspath(data_dir), "csv_left_slot": list(spec), "csv_sha256": hashes}
 
 
@@ -192,12 +194,19 @@ def main():
     parser.add_argument("--out-dir", default="experiments")
     parser.add_argument("--only", nargs="+", choices=[name for name, _ in EXPERIMENTS],
                         help="run only these experiments (baseline and the rows they are compared with are always included)")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="start even if preflight.py's checks find errors (e.g. to train on only some of the videos)")
     parser.add_argument("--skip-baselines", action="store_true", help="do not run baselines.py / detection_by_label.py")
     args = parser.parse_args()
     try:
         spec = csv_left_slot_spec(args.csv_left_slot)  # refuse a bad value before hours of training
     except argparse.ArgumentTypeError as error:
         parser.error(f"--csv-left-slot: {error}")
+    if not args.skip_preflight:
+        errors, warnings, info = run_checks(args.data_dir, args.out_dir)
+        print_findings(errors, warnings, info)
+        if errors:
+            sys.exit("preflight found errors, so nothing was started. Fix them, or pass --skip-preflight to run anyway.")
     try:
         claim_out_dir(args.out_dir, run_settings(args.data_dir, spec))
     except ValueError as error:

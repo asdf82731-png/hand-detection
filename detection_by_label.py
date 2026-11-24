@@ -20,7 +20,7 @@ import numpy as np
 
 from data_pipeline import load_frame_labels
 from features import extract_raw_hand_coords
-from train import VIDEO_NAMES, csv_left_slot_spec, data_sources, video_hand_mapping
+from workflow.data_setup import VIDEO_NAMES, csv_left_slot_spec, data_sources, video_hand_mapping
 
 GROUPS = {
     "stroke": {"full_stroke", "down_stroke", "up_stroke", "tab_stroke"},

@@ -20,7 +20,6 @@ that was never labeled); the stroke order (check_labels.py); and free disk space
 """
 import argparse
 import csv
-import hashlib
 import os
 import shutil
 import sys
@@ -28,18 +27,13 @@ import sys
 from check_labels import check_file
 from data_pipeline import load_frame_labels, parse_frame_id
 from features import source_frame_count
-from train import VIDEO_NAMES, data_sources
+from workflow.data_setup import VIDEO_NAMES, data_sources, file_sha256
 
 STROKE_LABELS = ("full_stroke", "down_stroke", "up_stroke", "tab_stroke")
 # Under this share of stroke frames a video is probably mostly unlabeled movement.
 MIN_STROKE_SHARE = 0.05
 # 16 experiments x 5 seeds, one model file each (17 MB), plus logs and room to spare.
 MIN_FREE_GB = 3.0
-
-
-def sha256(path):
-    with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
 
 
 def csv_label_counts(path):
@@ -89,7 +83,7 @@ def check_video(data_dir, name):
     total = sum(counts.values())
     strokes = sum(counts.get(label, 0) for label in STROKE_LABELS)
     holds = counts.get("up_hold", 0) + counts.get("down_hold", 0)
-    info.append(f"{name}: {total} rows, {strokes} stroke / {holds} hold / {counts.get('none', 0)} none, sha256 {sha256(csv_path)[:12]}")
+    info.append(f"{name}: {total} rows, {strokes} stroke / {holds} hold / {counts.get('none', 0)} none, sha256 {file_sha256(csv_path)[:12]}")
     if hold_as_none:
         errors.append(f"{name}: {hold_as_none} rows have motion_label 'hold' but are labeled none, so training reads them as none "
                       "(use the corrected file, e.g. Down_swapped_holdfix.csv, or relabel them down_hold / up_hold)")
@@ -137,18 +131,18 @@ def check_environment(out_dir):
     return errors, warnings, info
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--out-dir", default="experiments", help="where run_experiments.py will write, for the disk check")
-    args = parser.parse_args()
-
-    errors, warnings, info = check_environment(args.out_dir)
+def run_checks(data_dir, out_dir):
+    """Every check -> (errors, warnings, info lines); run_experiments.py calls this before it starts."""
+    errors, warnings, info = check_environment(out_dir)
     for name in VIDEO_NAMES:
-        e, w, i = check_video(args.data_dir, name)
+        e, w, i = check_video(data_dir, name)
         errors += e
         warnings += w
         info += i
+    return errors, warnings, info
+
+
+def print_findings(errors, warnings, info):
     for line in info:
         print(f"  ok       {line}")
     for line in warnings:
@@ -156,6 +150,16 @@ def main():
     for line in errors:
         print(f"  ERROR    {line}")
     print(f"\n{len(errors)} error(s), {len(warnings)} warning(s)")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--out-dir", default="experiments", help="where run_experiments.py will write, for the disk check")
+    args = parser.parse_args()
+
+    errors, warnings, info = run_checks(args.data_dir, args.out_dir)
+    print_findings(errors, warnings, info)
     if errors:
         print("Do not start the run until the errors are fixed.")
     sys.exit(1 if errors else 0)

@@ -18,7 +18,7 @@ import numpy as np
 
 from data_pipeline import LABELS, load_frame_labels
 from features import HANDS, detection_rates, extract_raw_hand_coords, iter_frames, reference_size
-from train import VIDEO_NAMES, data_sources
+from workflow.data_setup import VIDEO_NAMES, data_sources
 
 STROKE_LABELS = set(LABELS[:4])
 

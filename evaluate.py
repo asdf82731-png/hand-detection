@@ -27,7 +27,6 @@ Reporting rules (REV-7, see TRAINING_DESIGN.md "評估規範"):
     independent observations.
 """
 import argparse
-import hashlib
 import json
 import os
 import statistics
@@ -39,6 +38,7 @@ import torch
 from data_pipeline import LABEL_TO_INDEX, load_frame_labels
 from inference import NUM_STROKES, analyze, load_checkpoint
 from pipeline import LABELS
+from workflow.data_setup import file_sha256
 
 # A detected stroke counts as the labeled one if their frame ranges overlap,
 # allowing this many frames either side (TRAINING_DESIGN.md 6.4).
@@ -188,11 +188,6 @@ def summarize(blocks, samples=BOOTSTRAP_SAMPLES, confidence=CONFIDENCE, seed=0):
         "abs_count_error": abs_error(total), "abs_count_error_ci": interval([abs_error(r) for r in resampled]),
         "blocks": len(blocks),
     }
-
-
-def file_sha256(path):
-    with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
 
 
 def check_independent(checkpoint_path, csv_paths):

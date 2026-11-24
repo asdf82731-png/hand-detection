@@ -38,7 +38,6 @@ same model as before; see TRAINING_DESIGN.md):
 options give the same model and differences between options can be trusted.
 """
 import argparse
-import hashlib
 import os
 import random
 
@@ -53,8 +52,10 @@ from features import (
     FeatureScaler, extract_hand_tracks, pack_model_input, resample_length, window_inputs,
 )
 from model import StrokeBiLSTMModel, StrokeGRUModel
+from workflow.data_setup import (  # noqa: F401 (re-exported: other stages import these from train)
+    VIDEO_NAMES, csv_left_slot_spec, data_sources, file_sha256, hand_mapping, video_hand_mapping,
+)
 
-VIDEO_NAMES = ["Full", "Down", "Up", "Tab"]
 WINDOW_SIZE = 30
 TRAIN_STEP = 1  # thesis A23: dense windows; the split buffer still keeps train and val apart
 EPOCHS = 30
@@ -66,48 +67,6 @@ CHECKPOINT_PATH = "multi_motion_model_7class.pt"
 TIME_STRETCH_FACTORS = (0.8, 1.25)
 STATE_DIM = 6  # wrist height and angle, each with velocity and acceleration
 
-
-
-def data_sources(data_dir, name):
-    """(frames source, csv path) for one action: a frame folder if present, else the video."""
-    frames_dir = os.path.join(data_dir, name)
-    source = frames_dir if os.path.isdir(frames_dir) else os.path.join(data_dir, f"{name}.mp4")
-    return source, os.path.join(data_dir, f"{name}.csv")
-
-
-def hand_mapping(csv_left_slot):
-    """
-    Which tracker slot (features.HANDS) each CSV `hand` value refers to. A
-    swapped mapping trains every sample on the other hand's label without any
-    error, so it has no default: check_data.py works it out from the data. It
-    is saved in the checkpoint so inference reports left/right the same way.
-    """
-    return {"left": csv_left_slot, "right": "right" if csv_left_slot == "left" else "left"}
-
-
-def csv_left_slot_spec(text):
-    """
-    --csv-left-slot value -> (default slot, {video name: slot}): "left" or
-    "right", optionally followed by exceptions for single videos, e.g.
-    "left,Down=right". One mapping for all videos trains a video whose CSV
-    names the hands the other way on swapped labels (flow report D3).
-    """
-    default, *exceptions = [part.strip() for part in text.split(",")]
-    overrides = {}
-    for exception in exceptions:
-        name, _, slot = exception.partition("=")
-        if name not in VIDEO_NAMES or slot not in ("left", "right"):
-            raise argparse.ArgumentTypeError(f"{exception!r}: expected <video>=<left|right>, video one of {VIDEO_NAMES}")
-        overrides[name] = slot
-    if default not in ("left", "right"):
-        raise argparse.ArgumentTypeError(f"{default!r}: expected left or right first")
-    return default, overrides
-
-
-def video_hand_mapping(spec, name):
-    """The hand_mapping for one video under a csv_left_slot_spec."""
-    default, overrides = spec
-    return hand_mapping(overrides.get(name, default))
 
 
 def _sample(positions, states, first, span, slot, label, backward_diff=False, mirror_hands=False):
@@ -237,12 +196,6 @@ def one_vs_rest_auc(y_true, y_prob):
         is_class = y_true == class_id
         aucs[name] = float(roc_auc_score(is_class, y_prob[:, class_id])) if 0 < is_class.sum() < len(y_true) else None
     return aucs
-
-
-def file_sha256(path):
-    """Content hash of a label CSV; evaluate.py compares it with the evaluation CSVs."""
-    with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
 
 
 def set_seed(seed):

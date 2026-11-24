@@ -8,7 +8,9 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
+import run_experiments
 from run_experiments import (
     BASELINE_ROWS, COMPARED_WITH, EXPERIMENTS, baselines_done, chosen_experiments, claim_out_dir, results_table, run,
     run_settings,
@@ -140,6 +142,43 @@ class TestRuns(unittest.TestCase):
             open(os.path.join(folder, "baseline_seed0.pt"), "w").close()
             with self.assertRaises(ValueError):
                 claim_out_dir(folder, {"data_dir": "/data", "csv_left_slot": ["left", {}]})
+
+
+class TestPreflightGate(unittest.TestCase):
+    """
+    A run takes hours and a wrong label file does not stop it, so a run that
+    preflight.py would reject must not start. Only the gate is tested here:
+    `run` (the subprocess call) is replaced so nothing trains.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = os.path.join(self.tmp.name, "data")  # no label files: every video is a preflight ERROR
+        os.makedirs(self.data)
+        self.out = os.path.join(self.tmp.name, "out")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _main(self, *extra):
+        argv = ["run_experiments.py", "--data-dir", self.data, "--csv-left-slot", "left", "--out-dir", self.out,
+                "--only", "baseline", "--skip-baselines", *extra]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(run_experiments, "run", return_value=False) as fake_run:
+            with self.assertRaises(SystemExit) as raised:
+                run_experiments.main()
+        return raised.exception.code, fake_run
+
+    def test_a_run_preflight_rejects_starts_nothing(self):
+        code, fake_run = self._main()
+        self.assertIn("preflight found errors", str(code))
+        fake_run.assert_not_called()
+        self.assertFalse(os.path.exists(self.out), "a refused run must not claim the output folder")
+
+    def test_skip_preflight_lets_a_run_on_partial_data_start(self):
+        # ROADMAP Phase 1: train on whichever videos exist; train.py skips the missing ones.
+        _, fake_run = self._main("--skip-preflight")
+        self.assertEqual(fake_run.call_count, 1)
+        self.assertIn("train.py", fake_run.call_args[0][0][1])
 
 
 if __name__ == "__main__":
